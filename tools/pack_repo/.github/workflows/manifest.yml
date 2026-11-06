@@ -1,0 +1,32 @@
+# TSV 가 바뀌면(웹에서 고치거나 Pull Request 를 합치면) manifest.json 의 줄 수·sha256 을 다시 써서 커밋한다.
+# 안 그러면 프로그램이 sha256 이 맞지 않는다며 새 묶음을 받지 않는다. 형식이 깨진 줄이 있으면 실패로 알린다.
+# GITHUB_TOKEN 으로 한 커밋은 다시 이 작업을 부르지 않는다.
+name: manifest 갱신
+
+on:
+  push:
+    branches: [main]
+    paths: ["*.tsv"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: manifest 다시 쓰기
+        run: python3 tools/refresh_manifest.py .
+      - name: 바뀌었으면 커밋
+        run: |
+          if git diff --quiet -- manifest.json; then
+            echo "manifest 그대로"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "manifest 갱신"
+          git push

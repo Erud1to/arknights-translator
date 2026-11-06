@@ -1,0 +1,12 @@
+PaddleOCR 글자 검출·인식 모델 (ONNX)
+
+출처: PaddlePaddle 공식 Hugging Face 저장소
+  det.onnx      PP-OCRv5 mobile 검출   https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx  (inference.onnx, 2026-11-05 받음)
+  rec.onnx      PP-OCRv6 small 인식    https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx  (inference.onnx, 2026-11-06 받음,
+                sha256 은 Hugging Face 의 LFS oid 와 같음)
+  rec_dict.txt  위 인식 모델 inference.yml 의 character_dict 를 한 줄에 한 글자로 옮긴 것 (18,708자)
+라이선스: Apache License 2.0 (PaddleOCR, Copyright PaddlePaddle Authors)
+파일은 고치지 않았다 (이름만 바꿈).
+
+검출은 v5 mobile, 인식은 v6 small 을 섞어 쓴다. 문제 화면 51장에서 v5 둘·v6 small 둘·v6 medium 둘보다 이 조합이
+게임 데이터로 확인되는 글을 가장 많이 읽었고, DirectML·CPU 에서도 v5 보다 빨랐다.

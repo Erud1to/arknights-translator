@@ -1,0 +1,3 @@
+# .bat 은 CRLF 여야 cmd 가 제대로 읽는다. 나머지는 저장소에 적힌 그대로 둔다
+* -text
+*.bat text eol=crlf

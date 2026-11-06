@@ -1,0 +1,14 @@
+# 개인 설정·데이터: 번역기 키, 사용자 PC 에서 만드는 번역 DB, 번역캐시·용어집, 받은 번역 묶음, 문제 화면
+config.json
+data/
+debug/
+작업보고서.md
+# 개발 노트 (원리·찾는 순서·OCR 측정 등, 예전 README 전체). 이 PC 에만 둔다
+개발노트.md
+
+# 빌드 (tools/make_release.py)
+build/
+dist/
+__pycache__/
+*.pyc
+.venv-release/

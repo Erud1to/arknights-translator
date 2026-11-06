@@ -1,0 +1,6 @@
+mss
+numpy
+pillow
+requests
+winsdk
+opencv-python

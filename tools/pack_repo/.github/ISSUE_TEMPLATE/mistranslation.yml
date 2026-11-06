@@ -1,0 +1,43 @@
+name: 오역 제보
+description: 번역이 틀렸거나 어색한 줄을 알려 주세요. 프로그램의 '최근 번역 → 오역 제보' 로 열면 칸이 미리 채워집니다.
+title: "[오역] "
+labels: ["오역"]
+body:
+  - type: textarea
+    id: zh
+    attributes:
+      label: 원문 (중국어)
+      description: 게임 원문. 프로그램에서 열었으면 이미 채워져 있습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: ko
+    attributes:
+      label: 지금 번역
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: 고친 번역 (제안)
+      description: 이렇게 바꾸면 좋겠다는 번역. 모르면 무엇이 이상한지만 적어 주세요.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: 어디서 봤나요
+      placeholder: 예) 통합전략 상점, 이벤트 '시간이여, 앞으로!' 3화
+  - type: input
+    id: source
+    attributes:
+      label: 번역 출처
+      description: 프로그램이 채웁니다 (번역 묶음 / 저장됨 / 공식 …). 공식 번역이면 게임사 번역이라 여기서 고치지 않습니다.
+  - type: input
+    id: ocr
+    attributes:
+      label: 화면에서 읽은 글자 (원문과 다를 때)
+  - type: input
+    id: version
+    attributes:
+      label: 버전
