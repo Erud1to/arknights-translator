@@ -35,6 +35,15 @@ FUZZY_RATIO = 0.9       # 화면 글자와 틀 원문이 이만큼 같아야 한
 FUZZY_MARGIN = 0.01     # 둘째로 비슷한 틀과 이만큼은 차이 나야 한다
 
 
+def _slots_align(sm: difflib.SequenceMatcher) -> bool:
+    """sm 이 견준 두 틀 키(sm.a, sm.b)의 숫자 자리(#)가 하나하나 같은 자리에 맞서는가. 개수만 같고 자리가 밀리면 숫자가
+    엉뚱한 칸에 들어간다: OCR 이 '攻击力+60%' 를 '攻击力1+60%' 로 읽고 끝의 '2秒' 를 놓쳐 '공격력 +1 … 재능 효과 60%배'
+    가 됐다 (2026-11-08)."""
+    tk, cand = sm.a, sm.b
+    matched = sum(tk[i:i + n].count(tn.SLOT) for i, _j, n in sm.get_matching_blocks())
+    return matched == tk.count(tn.SLOT) == cand.count(tn.SLOT)
+
+
 def escape(text: str) -> str:
     return (text.replace("\\", "\\\\").replace("\t", "\\t")
             .replace("\n", "\\n").replace("\r", "\\r"))
@@ -163,18 +172,23 @@ class PackStore:
         for g in grams:
             votes.update(index.get(g, ()))
         best, best_score, second = None, 0.0, 0.0
+        best_sm = None
         slots = tk.count(tn.SLOT)
         for cand, n in votes.most_common(8):
             if n < len(grams) * 0.5:
                 break
             if cand.count(tn.SLOT) != slots or not 0.8 <= len(cand) / len(tk) <= 1.25:
                 continue
-            score = difflib.SequenceMatcher(None, tk, cand, autojunk=False).ratio()
+            sm = difflib.SequenceMatcher(None, tk, cand, autojunk=False)
+            score = sm.ratio()
             if score > best_score:
-                best, best_score, second = cand, score, best_score
+                best, best_score, second, best_sm = cand, score, best_score, sm
             elif score > second:
                 second = score
         if best is None or best_score < FUZZY_RATIO or best_score - second < FUZZY_MARGIN:
+            return None
+        # ratio() 가 이미 구해 둔 맞는 조각을 그대로 쓴다
+        if not _slots_align(best_sm):
             return None
         return self._templates.get(best)
 

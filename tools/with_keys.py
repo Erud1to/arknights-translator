@@ -19,15 +19,19 @@ KEYS = (("DEEPL_KEY", "deepl_key"), ("GEMINI_KEY", "gemini_key"),
         ("PAPAGO_ID", "papago_id"), ("PAPAGO_SECRET", "papago_secret"))
 
 
+def load_keys(cfg: dict) -> None:
+    """config 의 번역기 키를 환경 변수로 넘긴다. 환경 변수가 이미 있으면 그것을 둔다."""
+    for env, key in KEYS:
+        if cfg.get(key) and not os.environ.get(env):
+            os.environ[env] = str(cfg[key])
+
+
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] not in TOOLS:
         raise SystemExit(__doc__)
     from ak_translator import config
 
-    cfg = config.load()
-    for env, key in KEYS:
-        if cfg.get(key) and not os.environ.get(env):
-            os.environ[env] = cfg[key]
+    load_keys(config.load())
     name, args = sys.argv[1], sys.argv[2:]
     if "--out" not in args:
         args = ["--out", os.path.join(os.path.dirname(ROOT), "ak-translations"), *args]

@@ -9,6 +9,7 @@ OCR 은 화면이 잠깐 멈췄을 때만, 번역은 글자가 달라졌을 때�
 from __future__ import annotations
 
 import ctypes
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -237,6 +238,7 @@ class Engine(threading.Thread):
                     # 전투 중에는 화면 전체를 읽지 않는다. 구석만 가끔 보고 전투가 끝났는지 확인한다
                     self.status.state = "전투 중 · 번역 쉬는 중"
                     self._drop_stale(small, frame)     # '지금 번역' 으로 띄운 글자가 낡으면 지운다
+                    self._battle_mt(region)
                     if started >= next_battle_check:
                         next_battle_check = started + BATTLE_CHECK
                         # 스킬 연출이 잠깐 가릴 수 있어 두 번 연속 안 보여야 끝난 것으로 본다
@@ -325,6 +327,19 @@ class Engine(threading.Thread):
         (x0, y0, x1, y1), then = _cells_of(self._small, block.box)
         now = small[y0:y1, x0:x1]
         return now.size > 0 and float((np.abs(now - then) > STALE_DELTA).mean()) <= STALE_RATIO
+
+    def _battle_mt(self, region) -> None:
+        """전투 중 '지금 번역'(Ctrl+Alt+T)으로 읽은 글 가운데 기계 번역을 기다리던 것이 오면 띄운다.
+
+        기계 번역 결과는 평소 흐름(run 의 mt_ready)에서만 띄웠는데, 전투 중에는 그 흐름을 건너뛰어 공식·묶음 번역이 없는
+        글은 전투 중에 끝내 안 떴다 (2026-11-08 사용자: '전투 중이면 무조건 안되고 있음'). 전투 화면은 쉬지 않고 움직여
+        픽셀로 '그대로인가' 를 보면 거의 다 빠진다. 읽은 블록을 다 넘기고, 글자가 사라졌으면 다음 주기에
+        _drop_stale 이 글자 획으로 보고 지운다."""
+        if not self.mt_ready.is_set() or not self._blocks:
+            return
+        self.mt_ready.clear()
+        self._apply(self._blocks, self._frame, self._small, region, True)
+        self.post(self._items())
 
     def _drop_all(self) -> None:
         if self._shown:
@@ -937,6 +952,14 @@ JOIN_LEFT = 0.6     # 두 블록 왼쪽 끝 차이 상한 (글자 높이 배수)
 JOIN_MAX = 4        # 한 번에 이을 블록 수 상한
 
 
+_NUMBER_TAIL = re.compile(r"\s*\d+(?:\.\d+)?\s*%?\s*[秒次倍层点个格名人天回]?\s*[。.，,）)]?\s*")
+
+
+def _number_tail(text: str) -> bool:
+    """'2秒' '15%' '3次' 처럼 숫자와 단위 하나뿐인 조각 (윗줄 설명이 줄바꿈으로 갈린 끝)."""
+    return bool(_NUMBER_TAIL.fullmatch(text))
+
+
 def join_split_texts(blocks: list, known) -> list:
     """위아래로 붙은 블록들이 저마다는 번역이 없는데 이으면 공식 글이나 묶음 틀과 맞으면 하나로 잇는다.
 
@@ -966,7 +989,9 @@ def join_split_texts(blocks: list, known) -> list:
                 break
             if gap < -h * 0.3 or abs(bx - chain[0].box[0]) > h * JOIN_LEFT or not tn.has_cjk(b.text):
                 continue
-            if abs(b.line_h - a.line_h) > max(a.line_h, b.line_h) * 0.25 or known(b.text):
+            # 따로 번역이 있는 블록은 잇지 않는다. 다만 '2秒' 같은 숫자+단위 꼬리는 그 자체로 공식 번역('2초')이 있어도
+            # 윗줄 설명의 끝이다 ('…受到停顿效果，持续' + '2秒', 2026-11-08 화면). 안 이으면 설명의 숫자 수가 모자라 틀에서 빠졌다
+            if abs(b.line_h - a.line_h) > max(a.line_h, b.line_h) * 0.25 or (known(b.text) and not _number_tail(b.text)):
                 continue
             chain.append(b)
             used.append(j)

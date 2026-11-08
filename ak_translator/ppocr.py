@@ -150,14 +150,21 @@ class PaddleOCR:
             quads = self._detect(bgr)
             crops = [_crop(bgr, q) for q in quads]
             keys = [hashlib.blake2b(c.tobytes() + str(c.shape).encode(), digest_size=16).digest() for c, _o in crops]
-            todo = [i for i, k in enumerate(keys) if k not in self._cache]
+            # 이 화면의 결과는 따로 모은다. 새 줄을 기억에 넣다가 기억이 꽉 차면 오래된 것부터 지우는데, 이 화면에서
+            # 이미 찾은 줄이 그때 지워지면 아래에서 KeyError 가 났다 (2026-11-08 배포판 오류 기록)
+            found = {}
+            for k in keys:
+                if k in self._cache:
+                    self._cache.move_to_end(k)
+                    found[k] = self._cache[k]
+            todo = [i for i, k in enumerate(keys) if k not in found]
             if todo:
                 for i, res in zip(todo, self._recognize([crops[i][0] for i in todo])):
+                    found[keys[i]] = res
                     self._remember(keys[i], res)
             out = []
             for (crop, origin), key in zip(crops, keys):
-                self._cache.move_to_end(key)
-                line = _line(self._cache[key], origin)
+                line = _line(found[key], origin)
                 if line is not None:
                     out.append(line)
         if scale != 1.0:

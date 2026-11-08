@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import build_pack  # noqa: E402
 from polish_pack import ask  # noqa: E402
-from ak_translator import pack, textnorm as tn  # noqa: E402
+from ak_translator import mt, pack, textnorm as tn  # noqa: E402
 from ak_translator.glossary import Glossary  # noqa: E402
 from ak_translator.memory import GLOSSARY_HEADER, MarkdownStore  # noqa: E402
 from ak_translator.names import load_names  # noqa: E402
@@ -56,12 +56,17 @@ STORY_SYSTEM = SYSTEM.replace(
     "10. 맞춤법과 띄어쓰기를 지킨다.")
 
 
+class DeepLLimit(Exception):
+    """--stop-at-deepl-limit 일 때 DeepL 몫을 다 썼다. Gemini 혼자 옮기지 않고 멈춘다."""
+
+
 class Story:
     """스토리 파일 하나씩 옮긴다. 인물 예시·지문 예시는 모아 두고 다시 쓴다."""
 
-    def __init__(self, db, glossary, gemini, deepl, budget):
+    def __init__(self, db, glossary, gemini, deepl, budget, stop_at_limit=False):
         self.db, self.glossary, self.gemini, self.deepl = db, glossary, gemini, deepl
         self.budget = budget            # DeepL 로 더 보낼 수 있는 글자 수 (None 이면 제한 없음)
+        self.stop_at_limit = stop_at_limit  # DeepL 몫을 다 쓰면 Gemini 혼자 옮기지 않고 멈춘다
         self.spent = 0
         self.examples: dict[str, tuple] = {}
         self.narration = db.narration_examples(NARRATION_EXAMPLES)
@@ -140,11 +145,20 @@ class Story:
             return None
         chars = sum(len(l["zh"]) for l in lines)
         if self.budget is not None and self.spent + chars > self.budget:
+            if self.stop_at_limit:
+                raise DeepLLimit("DeepL 쓸 몫을 다 썼습니다")
             print("  DeepL 쓸 몫을 다 써서 여기부터는 Gemini 혼자 옮깁니다.")
             self.deepl = None
             return None
         self.spent += chars
-        results = translate_batch(self.glossary, self.deepl, [l["zh"] for l in lines], speakers)
+        try:
+            results = translate_batch(self.glossary, self.deepl, [l["zh"] for l in lines], speakers)
+        except mt.QuotaExhausted:
+            if self.stop_at_limit:
+                raise DeepLLimit("DeepL 한도를 다 썼습니다 (456)") from None
+            print("  DeepL 한도를 다 써서 여기부터는 Gemini 혼자 옮깁니다.")
+            self.deepl = None
+            return None
         return {l["id"]: ko for l, (ko, _label) in zip(lines, results)}
 
     def _problems(self, line: dict, ko: str, speakers: set[str]) -> list[str]:
@@ -195,6 +209,8 @@ def main() -> int:
     ap.add_argument("--budget", type=int, default=0, help="DeepL 로 보낼 글자 수 상한 (0 이면 남은 한도에서 --reserve 를 뺀 만큼)")
     ap.add_argument("--reserve", type=int, default=50000, help="DeepL 남은 한도 가운데 게임 중 화면 번역용으로 남겨 둘 글자 수")
     ap.add_argument("--models", default=",".join(STORY_MODELS), help="쓸 Gemini 모델 (앞에서부터, 쉼표로)")
+    ap.add_argument("--stop-at-deepl-limit", action="store_true",
+                    help=f"DeepL 몫(--reserve 를 남긴 만큼)을 다 쓰면 Gemini 혼자 옮기지 않고 멈춘다 (끝 값 {build_pack.DEEPL_STOPPED})")
     args = ap.parse_args()
     gemini_key = os.environ.get("GEMINI_KEY", "")
     if not gemini_key:
@@ -213,7 +229,7 @@ def main() -> int:
         deepl = build_pack.make_engine("deepl")
         budget = build_pack.spending_cap(deepl, args.budget, args.reserve)
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    story = Story(db, glossary, Gemini(gemini_key, models), deepl, budget)
+    story = Story(db, glossary, Gemini(gemini_key, models), deepl, budget, args.stop_at_deepl_limit)
 
     done_all = build_pack.load_existing(args.out)
     done = done_all.setdefault("story", {})
@@ -226,7 +242,16 @@ def main() -> int:
     left = sum(len(story.lines(f, done)[1]) for f in files)
     print(f"스토리 파일 {len(files):,}개 · 번역할 줄 {left:,}")
 
+    def save() -> None:
+        if args.print:
+            return
+        engines = dict(manifest.get("engines", {}))
+        engines.update({LABELS[k]: before[LABELS[k]] + story.counts[k] for k in LABELS if
+                        before[LABELS[k]] + story.counts[k]})
+        build_pack.write(args.out, done_all, manifest.get("game_revision", ""), engines)
+
     finished = 0
+    code = 0
     started = time.time()
     try:
         for n, file_id in enumerate(files, 1):
@@ -240,9 +265,10 @@ def main() -> int:
                     if args.print:
                         print(f"  {zh[:40]} → {ko}")
                     done[tn.key(zh)] = (zh, ko)
-            finished += len(todo)
+                finished += len(out)
             rate = finished / max(1e-6, time.time() - started) * 60
             print(f"  [{n}/{len(files)}] {path} {len(todo)}줄 · 누계 {finished:,}/{left:,} ({rate:.0f}줄/분) {story.counts}")
+            save()
             if story.deepl is not None and args.reserve:
                 # DeepL 은 이름 자리표까지 세어 더 깎는다. 실제 남은 한도로 한 번 더 막는다
                 try:
@@ -250,19 +276,23 @@ def main() -> int:
                 except Exception:
                     quota = None
                 if quota is not None and quota <= args.reserve:
+                    if args.stop_at_deepl_limit:
+                        raise DeepLLimit(f"DeepL 남은 한도가 {quota:,}자입니다")
                     print(f"  DeepL 남은 한도가 {quota:,}자라 여기부터는 Gemini 혼자 옮깁니다.")
                     story.deepl = None
-            if not args.print:
-                engines = dict(manifest.get("engines", {}))
-                engines.update({LABELS[k]: before[LABELS[k]] + story.counts[k] for k in LABELS if
-                                before[LABELS[k]] + story.counts[k]})
-                build_pack.write(args.out, done_all, manifest.get("game_revision", ""), engines)
+    except DeepLLimit as exc:
+        save()      # 파일 중간에서 멈췄으면 그 파일의 앞 묶음까지 남긴다
+        print(f"{exc}. Gemini 혼자 옮기지 않고 멈춥니다. 지금까지 옮긴 줄은 저장했습니다 (남은 {left - finished:,}줄).")
+        code = build_pack.DEEPL_STOPPED
     except GeminiError as exc:
-        print(f"Gemini 가 {exc} 멈춥니다. 지금까지 옮긴 파일은 저장했습니다. 다시 돌리면 이어서 합니다.")
+        save()
+        print(f"Gemini 가 {exc} 멈춥니다. 지금까지 옮긴 줄은 저장했습니다. 다시 돌리면 이어서 합니다.")
+        code = build_pack.GEMINI_STOPPED
     except KeyboardInterrupt:
-        print("멈춤. 지금까지 옮긴 파일은 저장했습니다.")
+        save()
+        print("멈춤. 지금까지 옮긴 줄은 저장했습니다.")
     print(f"옮긴 줄 {finished:,} · {story.counts} · DeepL 로 보낸 글자 {story.spent:,}")
-    return 0
+    return code
 
 
 if __name__ == "__main__":

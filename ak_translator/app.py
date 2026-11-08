@@ -682,7 +682,17 @@ class App:
         self.root.after(0, self.key_status.set, text)
 
     def _open(self, name: str) -> None:
-        os.startfile(os.path.join(config.DATA_DIR, name))
+        """번역캐시·용어집·오류 기록을 메모장으로 연다. .md 는 PC 마다 연결된 프로그램이 달라(7-Zip 으로 열려
+        '압축파일로 열 수 없음' 이 뜬 PC 가 있었다) 연결이 없으면 os.startfile 이 오류를 낸다. 메모장은 늘 있다."""
+        path = os.path.join(config.DATA_DIR, name)
+        if not os.path.exists(path):
+            self.msg_var.set(f"{name} 이 아직 없습니다.")
+            return
+        notepad = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "notepad.exe")
+        try:
+            subprocess.Popen([notepad if os.path.exists(notepad) else "notepad.exe", path])
+        except OSError as exc:
+            self.msg_var.set(f"{name} 을 열지 못했습니다: {exc}")
 
     def _open_errors(self) -> None:
         if os.path.exists(os.path.join(config.DATA_DIR, errlog.FILE)):

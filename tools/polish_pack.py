@@ -169,6 +169,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="다듬을 줄 수 상한 (시험용)")
     ap.add_argument("--dry-run", action="store_true", help="고칠 줄만 보여 주고 묶음은 그대로 둔다")
     ap.add_argument("--slots", action="store_true", help="숫자 틀('{…}' 이 든 줄)을 다듬는다 (--only 기본 templates)")
+    ap.add_argument("--keys", default="", help="이 파일에 적힌 줄(한 줄에 열쇠 하나)만 다듬는다. 새로 번역한 줄만 (game_update)")
     args = ap.parse_args()
     if args.slots and args.only == ap.get_default("only"):
         args.only = "templates"
@@ -188,17 +189,22 @@ def main() -> int:
     system = SYSTEM_SLOTS if args.slots else SYSTEM
     check = accept_slots if args.slots else accept
     done = build_pack.load_existing(args.out)
+    keys = build_pack.read_keys(args.keys)
     todo = [(cat, k, zh, ko) for cat in args.only.split(",") if cat in done
-            for k, (zh, ko) in done[cat].items() if ("{" in zh if args.slots else wanted(zh))]
+            for k, (zh, ko) in done[cat].items() if ("{" in zh if args.slots else wanted(zh))
+            and (keys is None or k in keys)]
     if args.limit:
         todo = todo[:args.limit]
     print(f"다듬을 줄 {len(todo):,} (분류 {args.only}) · 요청 {-(-len(todo) // BATCH)}번")
+    if not todo:
+        return 0
 
     with open(os.path.join(args.out, pack.MANIFEST), encoding="utf-8") as f:
         manifest = json.load(f)
     before = manifest.get("engines", {}).get(LABEL, 0)    # 지난번까지 다듬은 줄 수
     gemini = Gemini(key, DEFAULT_MODELS)
     changed = 0
+    code = 0
     for start in range(0, len(todo), BATCH):
         batch = todo[start:start + BATCH]
         lines, terms = [], {}
@@ -216,6 +222,7 @@ def main() -> int:
                      if isinstance(x, dict) and "id" in x and "ko" in x}
         except GeminiError as exc:
             print(f"Gemini 가 {exc} 멈춥니다. 지금까지 고친 것은 저장합니다.")
+            code = build_pack.GEMINI_STOPPED
             break
         except (ValueError, TypeError):
             print("  응답을 읽지 못해 이 묶음은 건너뜁니다.")
@@ -234,7 +241,7 @@ def main() -> int:
             build_pack.write(args.out, done, manifest.get("game_revision", ""), engines)
         time.sleep(1.0)
     print(f"고친 줄 {changed:,}" + (" (시험이라 저장하지 않음)" if args.dry_run else ""))
-    return 0
+    return code
 
 
 if __name__ == "__main__":

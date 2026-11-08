@@ -56,6 +56,9 @@ _SLOT = re.compile(r"\{(?!@)[^{}]+\}")
 MARK_BASE = 9001
 RETRY_WAIT = 30.0   # 번역기가 실패하면 이만큼 쉬었다가 다시 보낸다
 MAX_FAILS = 3
+# 끝낼 때 돌려주는 값. tools/game_update.py 가 보고 멈춘 까닭을 알린다
+DEEPL_STOPPED = 3   # DeepL 한도(화면 번역용으로 남길 몫 --reserve 포함)에 닿아 번역을 멈췄다
+GEMINI_STOPPED = 4  # Gemini 가 한도·키 문제로 멈췄다 (story_pack · polish_pack · fix_names)
 # 두 글자 이름은 보통 말이기도 해서 ('真理' 진리 / 이스티나, '跃跃欲试') 화면 번역은 스토리 화자일 때만 지킨다.
 # 묶음에는 화자가 없으니, 공식 번역에서 이 비율 이상 이름으로 옮겨진 이름과 공식 글에 거의 안 나오는 이름은 늘 지킨다
 NAME_RATE = 0.8
@@ -208,6 +211,14 @@ def load_existing(folder: str) -> dict[str, dict[str, tuple[str, str]]]:
         if os.path.exists(path):
             out[name] = {tn.key(zh): (zh, ko) for zh, ko in pack.read_tsv(path)}
     return out
+
+
+def read_keys(path: str) -> set[str] | None:
+    """--keys 파일(한 줄에 묶음 열쇠 하나, textnorm.key)을 읽는다. 경로가 없으면 None = 모든 줄."""
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as f:
+        return {line.rstrip("\n") for line in f if line.strip()}
 
 
 def write(folder: str, done: dict, revision: str, engines: dict) -> dict:
@@ -414,6 +425,7 @@ def main() -> int:
     budget = spending_cap(engine, args.budget, args.reserve)
     fix_quoted_terms(glossary, engine, [zh for name, zh in new if name == "templates"])
     i = requests = fails = lost_slots = 0
+    deepl_stop = False
     started = time.time()
     try:
         spent = 0
@@ -427,6 +439,8 @@ def main() -> int:
                 chars += len(item[1])
             if budget is not None and spent + chars > budget:
                 print(f"쓸 수 있는 글자 수({budget:,}자)에 닿아 멈춥니다. 남은 {len(new) - i:,}줄은 다음에 번역합니다.")
+                # --budget 을 따로 주지 않았거나 DeepL 남은 한도 쪽이 더 적었으면 DeepL 한도 때문에 멈춘 것
+                deepl_stop = args.engine == "deepl" and (not args.budget or budget < args.budget)
                 break
             spent += chars
             marks = [mark_slots(zh) if name == "templates" else (zh, None) for name, zh in batch]
@@ -435,6 +449,7 @@ def main() -> int:
                                           [rules.speakers(zh) for _n, zh in batch])
             except mt.QuotaExhausted:
                 print("번역기 한도를 다 써서 멈춥니다. 지금까지 번역한 것은 저장합니다.")
+                deepl_stop = args.engine == "deepl"
                 break
             except Exception as exc:    # 번역기 쪽 장애 (429, 연결 끊김 등). 쉬었다가 다시, 거듭되면 멈춘다
                 fails += 1
@@ -467,6 +482,7 @@ def main() -> int:
                 if left is not None and left <= args.reserve:
                     print(f"DeepL 남은 한도가 {left:,}자라 화면 번역용 몫을 지키려고 멈춥니다. "
                           f"남은 {len(new) - i:,}줄은 다음에 번역합니다.")
+                    deepl_stop = True
                     break
             time.sleep(pretranslate.PAUSE_BATCH if len(batch) > 1 else pretranslate.PAUSE_SINGLE)
     except KeyboardInterrupt:
@@ -478,6 +494,9 @@ def main() -> int:
           ", ".join(f"{k} {v['count']:,}줄" for k, v in manifest["files"].items()))
     if args.publish:
         publish(args.out, manifest["version"])
+    if deepl_stop:
+        print(f"DeepL 한도 때문에 멈췄습니다 (남은 {len(new) - i:,}줄).")
+        return DEEPL_STOPPED
     return 0
 
 
