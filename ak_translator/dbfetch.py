@@ -21,6 +21,15 @@ DB_MEMBER = "official.sqlite"
 RELEASE_TAG = "db"
 CHUNK = 1 << 20
 TIMEOUT = 20
+RETRIES = 1            # 5xx·연결 오류면 이만큼 더 해 본다
+RETRY_WAIT = 1.5       # 다시 해 보기 전에 쉬는 시간 (초)
+# zip 을 받다가 끊기면 받은 데서부터 이어 받기를 이만큼 해 본다. 2026-11-08 시험에서 122MB 를 받는 동안 GitHub 쪽이
+# 저절로 두 번 끊었다 (일부러 끊은 한 번 말고)
+RESUMES = 8
+# github.com 릴리스 받기 주소 → GitHub API 로 같은 파일 받기 (_get 설명)
+_RELEASE_URL = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/releases/download/([^/]+)/([^/?#]+)$")
+API_RELEASE = "https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+_via_api: dict[str, str] = {}   # 직접 주소가 안 돼 API 로 받은 주소 → 그 API 주소 (이어 받기 때 바로 쓴다)
 
 
 class FetchError(Exception):
@@ -38,17 +47,78 @@ def base_url(cfg: dict) -> str:
     return ""
 
 
-def _get(url: str, stream: bool = False):
-    import requests
+def _get(url: str, stream: bool = False, start: int = 0):
+    """url 을 받는다. 안 되면 FetchError.
 
+    github.com 릴리스 받기 주소(…/releases/download/…)는 2026-11-08 GitHub 한국 쪽 서버(koreacentral)에서 504 를
+    자주 내 배포판이 첫 실행에 공식 데이터를 못 받았다. 다른 저장소(cli/cli)도 같았고, GitHub API 로 같은 파일을
+    받는 길은 그때도 됐다. 그래서 한 번 더 해 보고, 그래도 안 되면 API 로 받는다.
+    start 를 주면 그 바이트부터 달라고 한다 (이어 받기). 서버가 들어주면 206, 아니면 200 으로 처음부터 온다."""
     if not url.startswith("https://") and not url.startswith("http://127.0.0.1"):
         raise FetchError("https 주소가 아닙니다")
+    if url in _via_api:
+        try:
+            return _request(_via_api[url], stream, "application/octet-stream", start)
+        except FetchError:
+            pass
     try:
-        resp = requests.get(url, stream=stream, timeout=TIMEOUT, headers={"User-Agent": version.USER_AGENT})
-        resp.raise_for_status()
-        return resp
-    except requests.RequestException as exc:
-        raise FetchError(f"받기 실패: {exc}") from exc
+        return _request(url, stream, start=start)
+    except FetchError:
+        m = _RELEASE_URL.match(url)
+        if not m:
+            raise
+        try:
+            api = _asset_api_url(*m.groups())
+            resp = _request(api, stream, "application/octet-stream", start)
+        except FetchError:
+            pass
+        else:
+            _via_api[url] = api
+            return resp
+        raise
+
+
+def _request(url: str, stream: bool, accept: str = "", start: int = 0):
+    import time
+
+    import requests
+
+    headers = {"User-Agent": version.USER_AGENT}
+    if accept:
+        headers["Accept"] = accept
+    if start:
+        headers["Range"] = f"bytes={start}-"
+    for attempt in range(RETRIES + 1):
+        last = attempt == RETRIES
+        try:
+            resp = requests.get(url, stream=stream, timeout=TIMEOUT, headers=headers)
+            if resp.status_code >= 500 and not last:
+                resp.close()
+                time.sleep(RETRY_WAIT)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            if last:
+                raise FetchError(f"받기 실패: {exc}") from exc
+            time.sleep(RETRY_WAIT)
+        except requests.RequestException as exc:
+            raise FetchError(f"받기 실패: {exc}") from exc
+    raise FetchError("받기 실패")
+
+
+def _asset_api_url(owner: str, repo: str, tag: str, name: str) -> str:
+    """릴리스 자산을 API 로 받을 주소 (Accept: application/octet-stream 으로 부르면 파일이 온다)."""
+    resp = _request(API_RELEASE.format(owner=owner, repo=repo, tag=tag), False, "application/vnd.github+json")
+    try:
+        assets = resp.json().get("assets") or []
+    except (ValueError, AttributeError) as exc:
+        raise FetchError("릴리스 정보를 읽지 못했습니다") from exc
+    for asset in assets:
+        url = str(asset.get("url") or "")
+        if asset.get("name") == name and url.startswith("https://api.github.com/"):
+            return url
+    raise FetchError(f"릴리스에 {name} 이 없습니다")
 
 
 def remote_info(base: str) -> dict | None:
@@ -77,23 +147,40 @@ def size_mb(info: dict) -> int:
 def download(base: str, info: dict, data_dir: str, progress=None, cancelled=None) -> str:
     """zip 을 받아 검사하고 data/official.sqlite.new 로 푼다. progress(받은 바이트, 전체 바이트, 단계).
     cancelled() 가 True 를 돌려주면 멈춘다. 돌려주는 값: .new 파일 경로."""
+    import time
+
+    import requests
+
     os.makedirs(data_dir, exist_ok=True)
     zinfo, dinfo = info["zip"], info.get("db") or {}
     total = int(zinfo.get("size", 0))
     part = os.path.join(data_dir, ZIP_NAME + ".part")
-    resp = _get(base + ZIP_NAME, stream=True)
     h = hashlib.sha256()
     got = 0
     try:
         with open(part, "wb") as f:
-            for chunk in resp.iter_content(CHUNK):
-                if cancelled and cancelled():
-                    raise FetchError("멈춤")
-                f.write(chunk)
-                h.update(chunk)
-                got += len(chunk)
-                if progress:
-                    progress(got, total, "받는 중")
+            for attempt in range(RESUMES + 1):
+                resp = _get(base + ZIP_NAME, stream=True, start=got)
+                try:
+                    if got and resp.status_code != 206:     # 이어 받기를 안 들어줬다. 처음부터 다시 받는다
+                        f.seek(0)
+                        f.truncate()
+                        h, got = hashlib.sha256(), 0
+                    for chunk in resp.iter_content(CHUNK):
+                        if cancelled and cancelled():
+                            raise FetchError("멈춤")
+                        f.write(chunk)
+                        h.update(chunk)
+                        got += len(chunk)
+                        if progress:
+                            progress(got, total, "받는 중")
+                    break
+                except requests.RequestException as exc:      # 받다가 끊겼다. 받은 데서부터 이어 받는다
+                    if attempt == RESUMES:
+                        raise FetchError(f"받다가 끊겼습니다 ({got / 1e6:.0f}MB 받음): {exc}") from exc
+                    time.sleep(RETRY_WAIT)
+                finally:
+                    resp.close()
         if (total and got != total) or h.hexdigest() != zinfo.get("sha256"):
             raise FetchError("받은 파일이 올라간 파일과 다릅니다 (크기·sha256). 다시 받아 주세요.")
         target = os.path.join(data_dir, DB_MEMBER + ".new")
@@ -118,7 +205,6 @@ def download(base: str, info: dict, data_dir: str, progress=None, cancelled=None
     except (OSError, zipfile.BadZipFile, KeyError) as exc:
         raise FetchError(f"받은 파일을 쓰거나 풀지 못했습니다: {exc}") from exc
     finally:
-        resp.close()
         try:
             os.remove(part)
         except OSError:
