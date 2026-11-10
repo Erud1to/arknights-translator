@@ -102,6 +102,25 @@ def align_sentences(zl: list[int], kl: list[int], zq: tuple[list[bool], list[boo
     return out[::-1]
 
 
+_LINE = re.compile(r"(?:\\n|\n)+")
+
+
+def zh_sentences(zh: str) -> list[str]:
+    """공식 중국어 글을 문장으로. 줄바꿈(문단·채팅 한 줄)은 문장 끝이다 ('……' 로 끝난 채팅 메시지가 다음 메시지와 한 문장이 되지 않게)."""
+    return [s for line in _LINE.split(tn.strip_rich(zh)) for s in _SENT.findall(line) if tn.key(s)]
+
+
+def ko_sentences(ko: str) -> list[str]:
+    return [s.strip() for line in _LINE.split(tn.strip_rich(ko)) for s in _KO_SENT.findall(line) if s.strip()]
+
+
+def _plausible(text: str, ks: list[str], zl: list[int], first: int, last: int) -> bool:
+    """뽑은 한국어의 길이가 중국어 구간 길이에 이 글 전체의 한·중 길이 비율을 곱한 값과 크게 다르면 짝짓기가 엇나간 것이다
+    (짧은 채팅 한 줄에 앞뒤 메시지·시각이 딸려 온 경우 등). 틀린 구간을 보이느니 못 맞췄다고 보고 기계 번역에 맡긴다."""
+    expected = sum(len(re.sub(r"\s", "", k)) for k in ks) / max(1, sum(zl)) * sum(zl[first:last + 1])
+    return 0.6 <= len(re.sub(r"\s", "", text)) / max(1.0, expected) <= 1.5
+
+
 @dataclass
 class Cover:
     ko: str
@@ -253,8 +272,7 @@ class PassageIndex:
         if whole >= 0.9:
             return tn.display_ko(c.ko)
         if c.via == "official":
-            zs = [s for s in _SENT.findall(tn.strip_rich(c.zh).replace("\\n", "")) if tn.key(s)]
-            ks = [s.strip() for s in _KO_SENT.findall(tn.strip_rich(c.ko).replace("\\n", " ")) if s.strip()]
+            zs, ks = zh_sentences(c.zh), ko_sentences(c.ko)
             if len(zs) == len(ks) >= 2 and sum(len(tn.key(s)) for s in zs) == len(c.key):
                 pos, first, last = 0, None, None
                 for i, s in enumerate(zs):
@@ -265,8 +283,10 @@ class PassageIndex:
                         last = i
                     pos += n
                 if first is not None and last is not None:
-                    return tn.display_ko(" ".join(ks[first:last + 1]))
-            elif len(zs) >= 2 and len(ks) >= 2 and sum(len(tn.key(s)) for s in zs) == len(c.key):
+                    got = " ".join(ks[first:last + 1])
+                    if _plausible(got, ks, [len(tn.key(s)) for s in zs], first, last):
+                        return tn.display_ko(got)
+            if len(zs) >= 2 and len(ks) >= 2 and sum(len(tn.key(s)) for s in zs) == len(c.key):
                 got = self._slice_aligned(c, zs, ks)
                 if got:
                     return got
@@ -295,8 +315,7 @@ class PassageIndex:
         if k0 is None or k1 is None:
             return None
         text = " ".join(ks[k0:k1])
-        window = sum(zl[first:last + 1])
-        if not 0.8 * window <= len(re.sub(r"\s", "", text)) <= 4 * window:       # 길이가 중국어 구간과 너무 다르면 엇나간 것
+        if not _plausible(text, ks, zl, first, last):
             return None
         return tn.display_ko(text)
 
