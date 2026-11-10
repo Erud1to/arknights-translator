@@ -177,6 +177,12 @@ class Resolver:
         self.story_ai = None
         self.set_story_ai(cfg)
         self.stats = {"official": 0, "pack": 0, "cache": 0, "mt": 0, "user": 0, "failed": 0}
+        self._index = None                                                 # 조각 색인 (cfg['matcher'] 가 'index'·'shadow' 일 때만 만든다)
+        self._shadow_path = f"{data_dir}/색인비교기록.jsonl"
+        self._shadow_seen: set[str] = set()
+        self._shadow_q: queue.Queue = queue.Queue(maxsize=64)
+        if cfg.get("matcher") in ("index", "shadow"):
+            self._index = self._new_index()                                # 켜자마자 뒤에서 묶음 색인을 만든다
         self._sent_cache: dict[str, list[str] | None] = {}                 # 문장 묶음 맞추기 결과 (_by_sentences)
         self._within_cache: dict[str, tuple[str, str, str] | None] = {}    # 잘린 문단 찾기 결과 (_within)
 
@@ -189,6 +195,8 @@ class Resolver:
         self._stop = False
         for i in range(2):
             threading.Thread(target=self._worker, name=f"mt{i}", daemon=True).start()
+        if cfg.get("matcher") == "shadow":
+            threading.Thread(target=self._shadow_worker, name="shadow", daemon=True).start()
 
     def stop(self) -> None:
         if self.story_ai is not None:
@@ -258,7 +266,7 @@ class Resolver:
         cjk = {ch for ch in k if "㐀" <= ch <= "鿿"}
         if cjk and cjk <= _STROKES and not re.search(r"[A-Za-z]", k):
             return Resolved(None, "skip")
-        res = self._decide(stripped, k, allow_mt, masked, pick)
+        res = self._reconcile_numbers(stripped, self._decide(stripped, k, allow_mt, masked, pick))
         if res.text and res.trim == (0, 0) and res.missed == (0, 0) and res.zh:
             # 퍼지로 맞춘 글이 화면 글자의 앞뒤를 뺀 것이면 그만큼이 헛것이다 ('凰招募干员次数' → '招募干员次数')
             res = replace(res, trim=_affix_trim(stripped, _clean(res.zh)))
@@ -266,6 +274,27 @@ class Resolver:
         if res.text and stripped != text and at >= 0:
             res = replace(res, trim=(res.trim[0] + at, res.trim[1] + len(text) - at - len(stripped)))
         return res
+
+    def _reconcile_numbers(self, text: str, res: Resolved) -> Resolved:
+        """화면 숫자가 게임 데이터 글의 숫자와 다르면 번역 속 옛 숫자를 화면 숫자로 바꾼다.
+
+        스택에 따라 계속 변하는 값(위수협의 '+46')이나 OCR 이 숫자를 틀리게 읽은 글이 비슷한 공식 글에 맞으면, 번역에 데이터의
+        숫자(+12)가 그대로 떠서 화면(+46)과 달랐다 (숫자만 바꾼 합성 150건 중 26% 가 옛 숫자). 두 글의 숫자 개수가 같고 값이
+        다른 자리마다, 그 옛 숫자가 번역에 정확히 한 번 나올 때만 바꾼다 (모호하면 그대로 둔다). 숫자 틀('{')은 이미 채웠다."""
+        if res.via not in ("official", "pack") or not res.text or not res.zh or "{" in res.zh or res.zh == text:
+            return res
+        zn = [n.lstrip("-") for n in tn.numbers_of(tn.strip_rich(res.zh).replace("\\n", " "))]
+        sn = [n.lstrip("-") for n in tn.numbers_of(tn.strip_rich(text))]
+        if not zn or len(zn) != len(sn) or zn == sn:
+            return res
+        out = res.text
+        for old, new in zip(zn, sn):
+            if old == new or zn.count(old) > 1:
+                continue
+            runs = list(re.finditer(r"(?<![\d.])" + re.escape(old) + r"(?![\d.])", out))
+            if len(runs) == 1:
+                out = out[:runs[0].start()] + new + out[runs[0].end():]
+        return res if out == res.text else replace(res, text=out)
 
     def _decide(self, text: str, k: str, allow_mt: bool, masked: str, pick) -> Resolved:
         own = self.user.get(k)
@@ -324,7 +353,13 @@ class Resolver:
             if dashed is not None:
                 return dashed
             # 짧은 화면 글자의 앞뒤를 놓치고 가운데만 읽은 것 ('目标生命值' → '标生命'), 한 자를 잘못 읽은 것
-            whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
+            if self.cfg.get("matcher") == "index":
+                # 조각 색인 (실험, 브랜치 index-matcher): 잘린 문단·이어 붙은 공식 항목을 한 방식으로 맞춘다
+                whole = self._completed(text) or self._one_off(text) or self._indexed(text)
+            else:
+                whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
+                if self.cfg.get("matcher") == "shadow":
+                    self._shadow_offer(text, whole)
             if whole is not None:
                 return whole
             # 두 줄을 한 덩어리로 읽은 '职业需求（最多3项）' · 남은 시간이 앞에 붙은 '27：弓1：22联络中'
@@ -745,6 +780,54 @@ class Resolver:
         ko, zh, via = found
         self.stats[via] += 1
         return Resolved(tn.display_ko(ko, self.cfg.get("nickname", "박사")), via, zh)
+
+    def _new_index(self):
+        from .index import PassageIndex
+
+        index = PassageIndex(self.db, self.pack)
+        threading.Thread(target=index.warm, name="index-warm", daemon=True).start()
+        return index
+
+    def _shadow_offer(self, text: str, rules: Resolved | None) -> None:
+        """그림자 방식: 화면에는 옛 규칙의 결과를 그대로 쓰고, 같은 글을 색인으로도 맞춰 서로 다른 것만 기록한다 (뒤 스레드)."""
+        k = tn.key(text)
+        if k in self._shadow_seen or len(self._shadow_seen) > 5000:
+            return
+        self._shadow_seen.add(k)
+        try:
+            self._shadow_q.put_nowait((text, rules.text if rules else None, rules.via if rules else None))
+        except queue.Full:
+            self._shadow_seen.discard(k)
+
+    def _shadow_worker(self) -> None:
+        import json
+        import os
+
+        while not self._stop:
+            text, ko, via = self._shadow_q.get()
+            if self._stop:
+                return
+            try:
+                found = self._index.cover(text) if self._index is not None else None
+                other = found.ko if found else None
+                if tn.key(other or "") == tn.key(ko or ""):
+                    continue                                               # 같은 결과: 기록할 것이 없다
+                if os.path.exists(self._shadow_path) and os.path.getsize(self._shadow_path) > 1024 * 1024:
+                    continue                                               # 기록은 1MB 까지만
+                row = {"zh": text, "rules": ko, "rules_via": via, "index": other, "index_via": found.via if found else None}
+                with open(self._shadow_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            except Exception:                                           # 비교 때문에 번역이 멈추면 안 된다
+                errlog.write("색인 비교 오류", True)
+
+    def _indexed(self, text: str) -> Resolved | None:
+        if self._index is None:
+            self._index = self._new_index()
+        found = self._index.cover(text)
+        if found is None:
+            return None
+        self.stats[found.via] += 1
+        return Resolved(found.ko, found.via, found.zh)
 
     def _by_sentences(self, text: str) -> Resolved | None:
         """공식 항목 여러 개가 한 블록으로 읽힌 긴 글을 문장 2~5개씩 묶어 가며 하나씩 공식(또는 번역 묶음) 번역으로 옮겨 잇는다.

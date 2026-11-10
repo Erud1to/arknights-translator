@@ -42,6 +42,8 @@ DEFAULTS = {
     "ocr_engine": "auto",
     # 번역 묶음 배포처 (manifest.json 이 있는 주소). config.json 에 비어 있으면 이 기본값을 쓴다
     "pack_url": "https://raw.githubusercontent.com/Erud1to/ak-translations/main/",
+    # 화면 글을 공식·번역 묶음 글에 맞추는 방식. index: 조각 색인(기본), rules: 옛 규칙, shadow: 옛 규칙으로 보이되 색인과 다른 결과를 기록
+    "matcher": "index",
     "panel_geometry": "",
     # peek: 누르고 있는 동안 번역문을 숨겨 원문을 본다
     "hotkeys": {"translate": "ctrl+alt+t", "toggle": "ctrl+alt+h", "capture": "ctrl+alt+s",
