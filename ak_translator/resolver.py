@@ -177,8 +177,11 @@ class Resolver:
         self.story_ai = None
         self.set_story_ai(cfg)
         self.stats = {"official": 0, "pack": 0, "cache": 0, "mt": 0, "user": 0, "failed": 0}
-        self._index = None                                                 # 조각 색인 (cfg['matcher']=='index' 일 때만 만든다)
-        if cfg.get("matcher") == "index":
+        self._index = None                                                 # 조각 색인 (cfg['matcher'] 가 'index'·'shadow' 일 때만 만든다)
+        self._shadow_path = f"{data_dir}/색인비교기록.jsonl"
+        self._shadow_seen: set[str] = set()
+        self._shadow_q: queue.Queue = queue.Queue(maxsize=64)
+        if cfg.get("matcher") in ("index", "shadow"):
             self._index = self._new_index()                                # 켜자마자 뒤에서 묶음 색인을 만든다
         self._sent_cache: dict[str, list[str] | None] = {}                 # 문장 묶음 맞추기 결과 (_by_sentences)
         self._within_cache: dict[str, tuple[str, str, str] | None] = {}    # 잘린 문단 찾기 결과 (_within)
@@ -192,6 +195,8 @@ class Resolver:
         self._stop = False
         for i in range(2):
             threading.Thread(target=self._worker, name=f"mt{i}", daemon=True).start()
+        if cfg.get("matcher") == "shadow":
+            threading.Thread(target=self._shadow_worker, name="shadow", daemon=True).start()
 
     def stop(self) -> None:
         if self.story_ai is not None:
@@ -353,6 +358,8 @@ class Resolver:
                 whole = self._completed(text) or self._one_off(text) or self._indexed(text)
             else:
                 whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
+                if self.cfg.get("matcher") == "shadow":
+                    self._shadow_offer(text, whole)
             if whole is not None:
                 return whole
             # 두 줄을 한 덩어리로 읽은 '职业需求（最多3项）' · 남은 시간이 앞에 붙은 '27：弓1：22联络中'
@@ -780,6 +787,38 @@ class Resolver:
         index = PassageIndex(self.db, self.pack)
         threading.Thread(target=index.warm, name="index-warm", daemon=True).start()
         return index
+
+    def _shadow_offer(self, text: str, rules: Resolved | None) -> None:
+        """그림자 방식: 화면에는 옛 규칙의 결과를 그대로 쓰고, 같은 글을 색인으로도 맞춰 서로 다른 것만 기록한다 (뒤 스레드)."""
+        k = tn.key(text)
+        if k in self._shadow_seen or len(self._shadow_seen) > 5000:
+            return
+        self._shadow_seen.add(k)
+        try:
+            self._shadow_q.put_nowait((text, rules.text if rules else None, rules.via if rules else None))
+        except queue.Full:
+            self._shadow_seen.discard(k)
+
+    def _shadow_worker(self) -> None:
+        import json
+        import os
+
+        while not self._stop:
+            text, ko, via = self._shadow_q.get()
+            if self._stop:
+                return
+            try:
+                found = self._index.cover(text) if self._index is not None else None
+                other = found.ko if found else None
+                if tn.key(other or "") == tn.key(ko or ""):
+                    continue                                               # 같은 결과: 기록할 것이 없다
+                if os.path.exists(self._shadow_path) and os.path.getsize(self._shadow_path) > 1024 * 1024:
+                    continue                                               # 기록은 1MB 까지만
+                row = {"zh": text, "rules": ko, "rules_via": via, "index": other, "index_via": found.via if found else None}
+                with open(self._shadow_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            except Exception:                                           # 비교 때문에 번역이 멈추면 안 된다
+                errlog.write("색인 비교 오류", True)
 
     def _indexed(self, text: str) -> Resolved | None:
         if self._index is None:
