@@ -157,4 +157,7 @@ def fill_template(zh_template: str, ko_template: str, ocr_text: str, first: int 
 def display_ko(text: str, nickname: str = "박사") -> str:
     """공식 한국어 문장을 화면에 보일 형태로 다듬는다."""
     text = strip_rich(text).replace("\\n", "\n")
+    if nickname == "박사":
+        # 공식 문장은 '{@nickname} 박사'(이름 + 호칭)라, 이름이 기본값 '박사'면 '박사 박사' 가 된다
+        text = re.sub(re.escape(NICKNAME) + r"\s*박사", "박사", text)
     return text.replace(NICKNAME, nickname)
