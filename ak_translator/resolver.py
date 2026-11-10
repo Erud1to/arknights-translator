@@ -295,7 +295,7 @@ class Resolver:
             # 한국 서버에 없는 숫자 틀 (스킬 설명 등): 번역 묶음의 틀을 화면 숫자로 채운다. 묶음 틀은 게임 글의 줄
             # (줄바꿈)마다 따로 있어, 화면에서 따로 묶인 '过载：…' 같은 단락도 맞는다. 못 채우면 화면 글자를 그대로
             # 다룬다 (DB 의 틀 원문을 기계 번역하면 '{atk_scale:0%}' 가 화면에 뜬다)
-            filled = self._pack_template(text) or self._template_within(text)
+            filled = self._pack_template(text) or self._template_within(text) or self._template_split(text)
             if filled is not None:
                 return filled
             hit = None
@@ -831,7 +831,29 @@ class Resolver:
                     return None
         return out
 
-    def _template_within(self, text: str) -> Resolved | None:
+    def _template_split(self, text: str) -> Resolved | None:
+        """숫자 틀 두 줄이 한 블록으로 읽힌 것: 첫 줄은 통째로, 둘째 줄은 앞부분만 보인다.
+        2026-11-10 배포판 캡처: '【叙拉古】干员部署后攻击速度+46，持续42秒（受层数影响) <在场6名不同的【叙拉古】干员' 는 묶음에 첫 줄
+        틀과 둘째 줄 틀이 따로 있는데 한 틀에 안 들어 기계 번역으로 갔다. 끊을 만한 자리(문장 부호·괄호 뒤)마다 앞은 틀 한 줄로,
+        뒤는 틀의 일부로 맞춰 본다."""
+        tk = tn.template_key(text)
+        if len(tk) < WITHIN_MIN * 2 or tn.SLOT not in tk:
+            return None
+        for i, ch in enumerate(text):
+            if ch not in "，。；：）)>＞>」” " or i < 8:
+                continue
+            head, tail = text[:i + 1], text[i + 1:].strip()
+            if len(tn.template_key(head)) < WITHIN_MIN or len(tn.template_key(tail)) < 8:
+                continue
+            first = self._pack_template(head)
+            if first is None or not first.text:
+                continue
+            rest = self._pack_template(tail) or self._template_within(tail, ratio=0.08)    # 끊어 낸 뒷부분은 틀의 아주 일부일 수 있다
+            if rest is not None and rest.text:
+                return Resolved(f"{first.text} {rest.text}", first.via, text)
+        return None
+
+    def _template_within(self, text: str, ratio: float = WITHIN_TPL_RATIO) -> Resolved | None:
         """줄이 잘려 숫자 틀의 일부만 읽힌 글(위수협의 스킬 설명 '…攻击速度+100，每次攻击对目标…最多5名地面敌人造成相当于')을
         틀에서 찾아, 보이는 숫자만 화면 값으로 채운다. 안 보이는 자리는 '…'. 틀이 하나로 좁혀질 때만 쓴다."""
         tk = tn.template_key(text)
@@ -843,8 +865,8 @@ class Resolver:
             if len(part) < WITHIN_MIN or part.count(tn.SLOT) != tk.count(tn.SLOT):
                 continue
             found: dict[str, tuple[str, str]] = {}
-            pairs = [(zh, ko, "official") for zh, ko in self.db.templates_containing(part, WITHIN_TPL_RATIO) if ko]
-            pairs += [(zh, ko, "pack") for zh, ko in self.pack.templates_containing(part, WITHIN_TPL_RATIO)]
+            pairs = [(zh, ko, "official") for zh, ko in self.db.templates_containing(part, ratio) if ko]
+            pairs += [(zh, ko, "pack") for zh, ko in self.pack.templates_containing(part, ratio)]
             for zh, ko, via in pairs:
                 ck = tn.template_key(zh)
                 at = ck.find(part)
