@@ -41,6 +41,67 @@ _SENT = re.compile(r"(?:[^。！？!?…]|…(?![”’」』）)]))*(?:[。！�
 _KO_SENT = re.compile(r".*?[.!?。]+[\"'”’)」』]*(?:\s+|$)|.+$", re.S)
 
 
+# 문장 맞추기 (Gale-Church): 번역하면서 문장을 나누거나 합쳐 중·한 문장 수가 다를 때, 길이 비율이 가장 그럴듯하게 이어지도록 짝을 짓는다
+_ALIGN_MOVES = ((1, 1, 0.0), (1, 2, 0.5), (2, 1, 0.5), (2, 2, 0.9), (1, 3, 1.2), (3, 1, 1.2), (1, 0, 3.0), (0, 1, 3.0))
+
+
+_QUOTE_OPEN = "“‘「『\"'"
+_QUOTE_CLOSE = "”’」』\"'"
+
+
+def _quote_flags(sents: list[str]) -> tuple[list[bool], list[bool]]:
+    """문장마다 (따옴표로 시작하나, 따옴표로 끝나나). 대사가 어디서 나뉘는지가 길이보다 믿을 만한 단서다."""
+    return ([s.lstrip()[:1] in _QUOTE_OPEN for s in sents], [s.rstrip()[-1:] in _QUOTE_CLOSE for s in sents])
+
+
+def align_sentences(zl: list[int], kl: list[int], zq: tuple[list[bool], list[bool]] | None = None,
+                    kq: tuple[list[bool], list[bool]] | None = None) -> list[tuple[int, int, int, int]] | None:
+    """중국어 문장 길이들 zl 과 한국어 문장 길이들 kl 을 (z0, z1, k0, k1) 묶음으로 짝짓는다 (반열린 구간). 안 맞으면 None.
+    zq·kq(따옴표 표시)가 있으면 묶음의 첫 문장이 따옴표로 열리는지, 끝 문장이 닫히는지가 서로 다를 때 벌점을 준다."""
+    n, m = len(zl), len(kl)
+    if not n or not m:
+        return None
+    ratio = sum(kl) / max(1, sum(zl))
+    band = max(8, int(0.25 * max(n, m)))
+    inf = float("inf")
+    cost = [[inf] * (m + 1) for _ in range(n + 1)]
+    back: list[list[tuple[int, int] | None]] = [[None] * (m + 1) for _ in range(n + 1)]
+    cost[0][0] = 0.0
+    zc, kc = [0], [0]
+    for v in zl:
+        zc.append(zc[-1] + v)
+    for v in kl:
+        kc.append(kc[-1] + v)
+    for i in range(n + 1):
+        centre = i * m / n
+        for j in range(max(0, int(centre) - band), min(m, int(centre) + band) + 1):
+            base = cost[i][j]
+            if base == inf:
+                continue
+            for a, b, pen in _ALIGN_MOVES:
+                ni, nj = i + a, j + b
+                if ni > n or nj > m:
+                    continue
+                z, k = zc[ni] - zc[i], kc[nj] - kc[j]
+                delta = (k - ratio * z) / (max(z, 4) * ratio * 3) ** 0.5
+                c = base + delta * delta / 2 + pen
+                if zq and kq and a and b:
+                    c += 0.8 * (zq[0][i] != kq[0][j]) + 0.8 * (zq[1][ni - 1] != kq[1][nj - 1])
+                if c < cost[ni][nj]:
+                    cost[ni][nj] = c
+                    back[ni][nj] = (i, j)
+    if cost[n][m] == inf:
+        return None
+    out, i, j = [], n, m
+    while (i, j) != (0, 0):
+        prev = back[i][j]
+        if prev is None:
+            return None
+        out.append((prev[0], i, prev[1], j))
+        i, j = prev
+    return out[::-1]
+
+
 @dataclass
 class Cover:
     ko: str
@@ -205,7 +266,39 @@ class PassageIndex:
                     pos += n
                 if first is not None and last is not None:
                     return tn.display_ko(" ".join(ks[first:last + 1]))
+            elif len(zs) >= 2 and len(ks) >= 2 and sum(len(tn.key(s)) for s in zs) == len(c.key):
+                got = self._slice_aligned(c, zs, ks)
+                if got:
+                    return got
         return tn.display_ko(c.ko) if allow_scope and whole >= SCOPE_MIN else None
+
+    def _slice_aligned(self, c: _Cand, zs: list[str], ks: list[str]) -> str | None:
+        """중·한 문장 수가 다른 글: 길이로 문장을 짝지어(align_sentences) 화면에 보이는 구간의 한국어 문장만 뽑는다."""
+        zl = [len(tn.key(s)) for s in zs]
+        pairs = align_sentences(zl, [len(re.sub(r"\s", "", s)) for s in ks], _quote_flags(zs), _quote_flags(ks))
+        if not pairs:
+            return None
+        starts = [0]
+        for n in zl:
+            starts.append(starts[-1] + n)
+        first = next((i for i in range(len(zs)) if starts[i + 1] > c.s0), None)
+        last = max((i for i in range(len(zs)) if starts[i] < c.s1), default=None)
+        if first is None or last is None or last < first:
+            return None
+        k0 = k1 = None
+        for z0, z1, j0, j1 in pairs:
+            if z1 <= first or z0 > last:
+                continue
+            if j1 > j0:
+                k0 = j0 if k0 is None else min(k0, j0)
+                k1 = j1 if k1 is None else max(k1, j1)
+        if k0 is None or k1 is None:
+            return None
+        text = " ".join(ks[k0:k1])
+        window = sum(zl[first:last + 1])
+        if not 0.8 * window <= len(re.sub(r"\s", "", text)) <= 4 * window:       # 길이가 중국어 구간과 너무 다르면 엇나간 것
+            return None
+        return tn.display_ko(text)
 
     # ------------------------------------------------------------ 바깥에서 부르는 곳
     def cover(self, text: str) -> Cover | None:

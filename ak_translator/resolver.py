@@ -379,6 +379,8 @@ class Resolver:
         if packed is not None:
             return packed
         cached = self.cache.get(tn.key(zh)) or self.cache.get(k)
+        if cached and "{" in cached[0]:
+            cached = None       # 틀 자리('{0:0%}')가 그대로 든 옛 기계 번역은 쓰지 않는다 (다시 번역한다)
         if cached:
             self._after_story_hit(hit)
             self.stats["cache"] += 1
@@ -388,13 +390,15 @@ class Resolver:
             hit = _usable(self.db.lookup(text, fuzzy=True), k)
             if hit and hit.ko:
                 return self._official(hit, text)
+            if hit and "{" in hit.zh:
+                hit = None      # 한국어가 없는 숫자 틀 원문('{0:0%}')을 기계 번역에 보내면 틀 자리가 화면에 뜬다. 화면 글자를 번역한다
             if hit:
                 zh = _clean(hit.zh)
                 packed = self._packed(zh, "", hit)
                 if packed is not None:
                     return packed
                 cached = self.cache.get(tn.key(zh))
-                if cached:
+                if cached and "{" not in cached[0]:
                     self._after_story_hit(hit)
                     self.stats["cache"] += 1
                     return Resolved(tn.strip_rich(cached[0]), "cache", zh, _in_story(hit))
