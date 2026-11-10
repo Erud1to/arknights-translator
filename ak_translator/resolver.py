@@ -261,7 +261,7 @@ class Resolver:
         cjk = {ch for ch in k if "㐀" <= ch <= "鿿"}
         if cjk and cjk <= _STROKES and not re.search(r"[A-Za-z]", k):
             return Resolved(None, "skip")
-        res = self._decide(stripped, k, allow_mt, masked, pick)
+        res = self._reconcile_numbers(stripped, self._decide(stripped, k, allow_mt, masked, pick))
         if res.text and res.trim == (0, 0) and res.missed == (0, 0) and res.zh:
             # 퍼지로 맞춘 글이 화면 글자의 앞뒤를 뺀 것이면 그만큼이 헛것이다 ('凰招募干员次数' → '招募干员次数')
             res = replace(res, trim=_affix_trim(stripped, _clean(res.zh)))
@@ -269,6 +269,27 @@ class Resolver:
         if res.text and stripped != text and at >= 0:
             res = replace(res, trim=(res.trim[0] + at, res.trim[1] + len(text) - at - len(stripped)))
         return res
+
+    def _reconcile_numbers(self, text: str, res: Resolved) -> Resolved:
+        """화면 숫자가 게임 데이터 글의 숫자와 다르면 번역 속 옛 숫자를 화면 숫자로 바꾼다.
+
+        스택에 따라 계속 변하는 값(위수협의 '+46')이나 OCR 이 숫자를 틀리게 읽은 글이 비슷한 공식 글에 맞으면, 번역에 데이터의
+        숫자(+12)가 그대로 떠서 화면(+46)과 달랐다 (숫자만 바꾼 합성 150건 중 26% 가 옛 숫자). 두 글의 숫자 개수가 같고 값이
+        다른 자리마다, 그 옛 숫자가 번역에 정확히 한 번 나올 때만 바꾼다 (모호하면 그대로 둔다). 숫자 틀('{')은 이미 채웠다."""
+        if res.via not in ("official", "pack") or not res.text or not res.zh or "{" in res.zh or res.zh == text:
+            return res
+        zn = [n.lstrip("-") for n in tn.numbers_of(tn.strip_rich(res.zh).replace("\\n", " "))]
+        sn = [n.lstrip("-") for n in tn.numbers_of(tn.strip_rich(text))]
+        if not zn or len(zn) != len(sn) or zn == sn:
+            return res
+        out = res.text
+        for old, new in zip(zn, sn):
+            if old == new or zn.count(old) > 1:
+                continue
+            runs = list(re.finditer(r"(?<![\d.])" + re.escape(old) + r"(?![\d.])", out))
+            if len(runs) == 1:
+                out = out[:runs[0].start()] + new + out[runs[0].end():]
+        return res if out == res.text else replace(res, text=out)
 
     def _decide(self, text: str, k: str, allow_mt: bool, masked: str, pick) -> Resolved:
         own = self.user.get(k)
