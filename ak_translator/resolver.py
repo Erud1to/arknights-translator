@@ -177,6 +177,9 @@ class Resolver:
         self.story_ai = None
         self.set_story_ai(cfg)
         self.stats = {"official": 0, "pack": 0, "cache": 0, "mt": 0, "user": 0, "failed": 0}
+        self._index = None                                                 # 조각 색인 (cfg['matcher']=='index' 일 때만 만든다)
+        if cfg.get("matcher") == "index":
+            self._index = self._new_index()                                # 켜자마자 뒤에서 묶음 색인을 만든다
         self._sent_cache: dict[str, list[str] | None] = {}                 # 문장 묶음 맞추기 결과 (_by_sentences)
         self._within_cache: dict[str, tuple[str, str, str] | None] = {}    # 잘린 문단 찾기 결과 (_within)
 
@@ -324,7 +327,11 @@ class Resolver:
             if dashed is not None:
                 return dashed
             # 짧은 화면 글자의 앞뒤를 놓치고 가운데만 읽은 것 ('目标生命值' → '标生命'), 한 자를 잘못 읽은 것
-            whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
+            if self.cfg.get("matcher") == "index":
+                # 조각 색인 (실험, 브랜치 index-matcher): 잘린 문단·이어 붙은 공식 항목을 한 방식으로 맞춘다
+                whole = self._completed(text) or self._one_off(text) or self._indexed(text)
+            else:
+                whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
             if whole is not None:
                 return whole
             # 두 줄을 한 덩어리로 읽은 '职业需求（最多3项）' · 남은 시간이 앞에 붙은 '27：弓1：22联络中'
@@ -745,6 +752,22 @@ class Resolver:
         ko, zh, via = found
         self.stats[via] += 1
         return Resolved(tn.display_ko(ko, self.cfg.get("nickname", "박사")), via, zh)
+
+    def _new_index(self):
+        from .index import PassageIndex
+
+        index = PassageIndex(self.db, self.pack)
+        threading.Thread(target=index.warm, name="index-warm", daemon=True).start()
+        return index
+
+    def _indexed(self, text: str) -> Resolved | None:
+        if self._index is None:
+            self._index = self._new_index()
+        found = self._index.cover(text)
+        if found is None:
+            return None
+        self.stats[found.via] += 1
+        return Resolved(found.ko, found.via, found.zh)
 
     def _by_sentences(self, text: str) -> Resolved | None:
         """공식 항목 여러 개가 한 블록으로 읽힌 긴 글을 문장 2~5개씩 묶어 가며 하나씩 공식(또는 번역 묶음) 번역으로 옮겨 잇는다.
