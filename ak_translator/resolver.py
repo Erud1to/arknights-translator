@@ -294,6 +294,9 @@ class Resolver:
         for old, new in zip(zn, sn):
             if old == new or zn.count(old) > 1:
                 continue
+            # 능력치 숫자(+46, 12%, 5秒, 3层)만 바꾼다. 연도·시각·번호('1099年', '16:26')는 OCR 이 헛숫자를 읽어도 그대로 둔다
+            if not re.search(r"[+＋-]\s?" + re.escape(new) + r"|" + re.escape(new) + r"\s?[%％点秒分时天次格名倍级个层回发人枚只件位阶星]", text):
+                continue
             runs = list(re.finditer(r"(?<![\d.])" + re.escape(old) + r"(?![\d.])", out))
             if len(runs) == 1:
                 out = out[:runs[0].start()] + new + out[runs[0].end():]
@@ -610,6 +613,8 @@ class Resolver:
         묶음·내 용어)이면 그 번역을 잇는다. 이름표 둘이 붙어 읽혔으면('视相博物馆演化') 둘 다 확인되는 자리에서 가른다."""
         if not _LATIN_RUN.search(text):
             return None
+        if len(tn.key(text)) > 40 or _SENTENCE_MARK.search(text):
+            return None     # 이름표가 아니라 문장이다 (대사 속 'Missy' 때문에 둘로 쪼개 따로 번역하면 겹쳐 뜬다)
         pieces = [p.strip(" ·-—|") for p in _LATIN_RUN.split(text)]
         pieces = [p for p in pieces if p]
         if not pieces or len(pieces) > 3:
