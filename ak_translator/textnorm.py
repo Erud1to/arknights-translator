@@ -50,6 +50,9 @@ def key(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum()).lower()
 
 
+_SPLIT_DECIMAL = re.compile(r"(?<=\d)\.\s+(?=\d)")     # OCR 이 '1.0' 을 '1. 0' 으로 읽는다 (2026-11-10 위수협의 캡처)
+
+
 def template_key(text: str) -> str:
     """숫자가 바뀌는 문장(스킬 설명 등)을 위한 키.
 
@@ -58,6 +61,7 @@ def template_key(text: str) -> str:
     """
     text = strip_rich(text)
     text = _STORY_VAR.sub("", text)
+    text = _SPLIT_DECIMAL.sub(".", text)
     text = _TEMPLATE.sub(SLOT, text)
     text = unicodedata.normalize("NFKC", text)
     text = _NUMBER.sub(SLOT, text)
@@ -79,7 +83,7 @@ def _slot_marks(text: str) -> list[tuple[str, str]]:
 
 def numbers_of(text: str) -> list[str]:
     """화면 글자의 숫자들. 음수는 '-' 를 붙여 돌려준다 ('攻击力-70%' → '-70%')."""
-    return _SIGNED_NUMBER.findall(unicodedata.normalize("NFKC", text).replace("−", "-"))
+    return _SIGNED_NUMBER.findall(_SPLIT_DECIMAL.sub(".", unicodedata.normalize("NFKC", text).replace("−", "-")))
 
 
 _ZH_CLAUSE = re.compile(r"(?<=[，；。！？])")
