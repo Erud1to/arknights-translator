@@ -73,6 +73,8 @@ _TAG_SEP = re.compile(r"[\[\]【】．·|/]+")           # 나란한 꼬리표 �
 _COUNTDOWN_TAIL = re.compile(r"(?<=[㐀-鿿])(?=\d+\s*(?:天|小时|分钟|秒)$)")   # 글자 바로 뒤에 붙은 남은 시간
 _ICON_ZERO = re.compile(r"^0(?=\d+\s*(?:天|小时|分钟|秒)$)")   # 시계 아이콘을 읽은 '0' ('056秒' → '56秒')
 _PUNCT = " ，。！？、：；…—·,.!?:;\"'“”‘’《》〈〉<>()（）"
+# 문단 사이의 여닫는 따옴표(” “)를 OCR 이 '99'·'66' 으로 읽은 것 ('也许都不是。 99经过了…'). 기계 번역이 99 를 그대로 번역하고 공식 글 맞추기도 어긋난다
+_QUOTE_NOISE = re.compile(r"(?<=[。！？…，、”])\s?(?:99|66)(?!\s?[年月日天次个名层级人万元倍%％秒分时点])(?=\s?[㐀-鿿“…])")
 # 이름 끝 '-α/β/γ' 를 영문으로 읽은 것 (통합전략 유물 '林间夜话-α')
 _GREEK = re.compile(r"(?<=[㐀-鿿][-－])([aABbyY])(?![A-Za-z])")
 _GREEK_OF = {"a": "α", "A": "α", "B": "β", "b": "β", "y": "γ", "Y": "γ"}
@@ -257,6 +259,7 @@ class Resolver:
         # 기록 화면의 '您Dr.<플레이어 이름>使用…'. 한글 이름은 OCR 이 못 읽어 엉뚱한 한자('叫导')가 되고 기계 번역이
         # 'Dr. Jiaodao' 를 만든다. 게임 글의 'Dr.{@nickname}' 처럼 '博士' 로 바꿔 번역한다 (→ '박사님')
         stripped = _PLAYER_NAME.sub("您博士", stripped)
+        stripped = _QUOTE_NOISE.sub(" ", stripped)
         k = tn.key(stripped)
         # 선·테두리·아이콘을 읽은 헛것 ('一。' 이 요일 '월' 로 번역되어 메인 화면에 떠 있었다).
         # 헛것을 떼고 글자 하나만 남았으면 그것도 헛것이다 (파티클 '0，与' → '와')
@@ -360,6 +363,8 @@ class Resolver:
                 whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
                 if self.cfg.get("matcher") == "shadow":
                     self._shadow_offer(text, whole)
+            if whole is None and (hit is None or hit.via == "template"):
+                whole = self._template_noisy(text)          # 다른 방법이 다 안 맞은 잘린 숫자 틀 글 (한가운데 헛글자)
             if whole is not None:
                 return whole
             # 두 줄을 한 덩어리로 읽은 '职业需求（最多3项）' · 남은 시간이 앞에 붙은 '27：弓1：22联络中'
@@ -900,7 +905,9 @@ class Resolver:
         if len(tk) < WITHIN_MIN * 2 or tn.SLOT not in tk:
             return None
         for i, ch in enumerate(text):
-            if ch not in "，。；：）)>＞>」” " or i < 8:
+            # 둘째 줄이 '<' 로 시작하는 틀('<在场6名不同的【乌萨斯】干员>…')은 앞 줄과 구두점 없이 붙어 읽힌다. '<' 바로 앞에서도 끊어 본다
+            before = text[i + 1:i + 2] == "<"
+            if (ch not in "，。；：）)>＞>」” " and not before) or i < 8:
                 continue
             head, tail = text[:i + 1], text[i + 1:].strip()
             if len(tn.template_key(head)) < WITHIN_MIN or len(tn.template_key(tail)) < 8:
@@ -924,24 +931,9 @@ class Resolver:
             part = tk[head:len(tk) - tail]
             if len(part) < WITHIN_MIN or part.count(tn.SLOT) != tk.count(tn.SLOT):
                 continue
-            found: dict[str, tuple[str, str]] = {}
             pairs = [(zh, ko, "official") for zh, ko in self.db.templates_containing(part, ratio) if ko]
             pairs += [(zh, ko, "pack") for zh, ko in self.pack.templates_containing(part, ratio)]
-            for zh, ko, via in pairs:
-                ck = tn.template_key(zh)
-                at = ck.find(part)
-                if at < 0:
-                    continue
-                first = ck[:at].count(tn.SLOT)
-                # 보이는 절만 잘라 쓴다. 절 수가 안 맞으면 번역 전체를 쓰되 보이는 부분이 절반 가까이는 되어야 한다
-                sliced = tn.clause_slice(zh, ko, part, first)
-                if sliced is not None:
-                    zh, ko, first = sliced
-                elif len(part) < len(ck) * WITHIN_RATIO:
-                    continue
-                filled = tn.fill_template(zh, ko, text, first)
-                if filled:
-                    found.setdefault(filled, (zh, via))
+            found = self._template_fill(text, part, pairs)
             if len(found) == 1:
                 filled, (zh, via) = next(iter(found.items()))
                 self.stats[via] += 1
@@ -949,6 +941,72 @@ class Resolver:
             if found:
                 return None
         return None
+
+    def _template_fill(self, text: str, part: str, pairs: list[tuple[str, str, str]]) -> dict[str, tuple[str, str]]:
+        """part(틀 키의 일부)를 품은 틀마다 보이는 절만 잘라 화면 숫자를 채운 번역 {번역: (원문 틀, 출처)}."""
+        found: dict[str, tuple[str, str]] = {}
+        for zh, ko, via in pairs:
+            ck = tn.template_key(zh)
+            at = ck.find(part)
+            if at < 0:
+                continue
+            first = ck[:at].count(tn.SLOT)
+            # 보이는 절만 잘라 쓴다. 절 수가 안 맞으면 번역 전체를 쓰되 보이는 부분이 절반 가까이는 되어야 한다
+            sliced = tn.clause_slice(zh, ko, part, first)
+            if sliced is not None:
+                zh, ko, first = sliced
+            elif len(part) < len(ck) * WITHIN_RATIO:
+                continue
+            filled = tn.fill_template(zh, ko, text, first)
+            if filled:
+                found.setdefault(filled, (zh, via))
+        return found
+
+    def _template_noisy(self, text: str) -> Resolved | None:
+        tk = tn.template_key(text)
+        if tn.SLOT not in tk or tn.cjk_count(tk) < 8 or len(tn.numbers_of(tn.strip_rich(text))) != tk.count(tn.SLOT):
+            return None
+        return self._template_within_noisy(text, tk, WITHIN_TPL_RATIO)
+
+    def _template_within_noisy(self, text: str, tk: str, ratio: float) -> Resolved | None:
+        """잘린 숫자 틀 글 한가운데에 OCR 이 헛글자 한두 개를 끼운 것('…生命流失，兰当伤害来源…'). 앞·뒤 토막 하나가 틀에 그대로 들어 있으면
+        그 자리에서 틀 키의 같은 길이 구간을 잘라 비교하고(90% 이상 같으면) 그 구간을 보이는 부분으로 본다."""
+        import difflib
+
+        n = len(tk)
+        if n < WITHIN_MIN * 2:
+            return None
+        size = 8
+        found: dict[str, tuple[str, str]] = {}
+        anchors, offset = [], 0
+        for piece in tk.split(tn.SLOT):                                          # 숫자 자리가 없는 토막의 양 끝을 닻으로 쓴다
+            if len(piece) >= size:
+                anchors += [(offset, piece[:size]), (offset + len(piece) - size, piece[-size:])]
+            offset += len(piece) + 1
+        for at_tk, anchor in anchors:
+            if tn.cjk_count(anchor) < size - 1:
+                continue
+            r = len(anchor) / (n / ratio)
+            pairs = [(zh, ko, "official") for zh, ko in self.db.templates_containing(anchor, r) if ko]
+            pairs += [(zh, ko, "pack") for zh, ko in self.pack.templates_containing(anchor, r)]
+            for zh, ko, via in pairs:
+                ck = tn.template_key(zh)
+                at = ck.find(anchor)
+                start = at - at_tk
+                if at < 0 or start < 0:
+                    continue
+                for width in (n, n - 1, n - 2):                                  # 헛글자 수만큼 틀 쪽 구간이 짧다
+                    part = ck[start:start + width]
+                    if len(part) < WITHIN_MIN or part.count(tn.SLOT) != tk.count(tn.SLOT):
+                        continue
+                    if difflib.SequenceMatcher(None, tk, part, autojunk=False).ratio() >= 0.9:
+                        found.update(self._template_fill(text, part, [(zh, ko, via)]))
+                        break
+        if len(found) != 1:
+            return None
+        filled, (zh, via) = next(iter(found.items()))
+        self.stats[via] += 1
+        return Resolved(tn.display_ko(filled, self.cfg.get("nickname", "박사")), via, zh)
 
     def _find_within(self, k: str) -> tuple[str, str, str] | None:
         for head, tail in WITHIN_CUTS:
