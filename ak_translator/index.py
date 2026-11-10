@@ -9,7 +9,7 @@
   3 고르기 cover·ident 가 기준 이상인 후보 중 T 를 덮는 가장 작은 글. 한 글로 안 덮이면 문장 2~5개씩 묶어 하나씩(이어 붙은
            공식 항목) 같은 방식으로 맞춘다. 하나라도 못 맞추면 None (그러면 기계 번역).
   4 자르기 글의 일부 구간만 맞았으면 중·한 문장 수가 같을 때 해당 문장만, 다르면 구간이 글의 60% 이상일 때만 통째로.
-Resolver 가 cfg['matcher']=='index' 일 때만 쓴다 (기본은 옛 규칙).
+Resolver 가 cfg["matcher"]=="index"(기본)일 때 쓴다. "rules" 로 옛 규칙으로 돌아갈 수 있다.
 """
 from __future__ import annotations
 
