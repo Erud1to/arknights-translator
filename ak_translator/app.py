@@ -56,6 +56,7 @@ KEY_LINKS = {
               ("무료 키 가입", "https://www.deepl.com/pro-api")),
 }
 VIA_LABELS = {"official": "공식", "pack": "번역 묶음", "user": "내 용어", "cache": "저장됨", "mt": "기계 번역"}
+RESTART_ENV = "AK_RESTARTED"    # 다시 켠 프로세스에 넘기는 표시. 이전 프로세스가 끝나기를 기다린다
 PEEK_POLL_MS = 40           # 원문 보기 단축키를 뗐는지 보는 간격
 PEEK_MARGIN = 0.15          # 키 반복으로 뗐는지 알아낼 때, 반복이 늦게 와도 기다려 주는 여유 (초)
 PEEK_REPEAT_MIN = 0.12      # 반복 사이를 이것보다 짧게는 보지 않는다 (초)
@@ -503,9 +504,9 @@ class App:
                                "대부분의 화면이 바로 번역됩니다.",
                   style="Muted.TLabel", wraplength=400).pack(anchor="w", padx=16, pady=(6, 0))
         self._show_pack()
-        if self.cfg.get("pack_url"):
-            # 창이 뜬 뒤에 새 판이 있는지만 본다 (받기는 누를 때)
-            self.root.after(3000, lambda: threading.Thread(target=self._check_pack, daemon=True).start())
+        if self.cfg.get("pack_url") or dbfetch.base_url(self.cfg):
+            # 창이 뜬 뒤에 새 번역 묶음·공식 데이터가 올라왔는지 한 번 보고, 있으면 팝업으로 묻는다
+            self.root.after(3000, lambda: threading.Thread(target=self._check_updates, daemon=True).start())
 
         theme.section(parent, "직접 고치기").pack(anchor="w", padx=16, pady=(18, 6))
         row = ttk.Frame(parent, style="Card.TFrame")
@@ -712,14 +713,101 @@ class App:
             self.pack_btn.configure(state="disabled")
         self.pack_var.set(text + (f"\n{note}" if note else ""))
 
-    def _check_pack(self) -> None:
-        """배포처에 더 새 판이 있는지 본다. 내려받지는 않는다."""
-        try:
-            remote = pack_mod.remote_version(self.cfg["pack_url"])
-        except (OSError, ValueError):
+    # ------------------------------------------------------------- 새 번역 알림
+    def _notice(self, text: str) -> None:
+        """작업 스레드에서 상태 줄에 알린다."""
+        self.root.after(0, self.msg_var.set, text)
+
+    def _check_updates(self) -> None:
+        """켤 때 한 번, 배포처에 새 번역 묶음·공식 데이터가 올라왔는지 본다. 있으면 팝업으로 묻는다.
+        2026-11-10 사용자: '배포판에 새 번역 알림 안 감' — 예전에는 데이터 탭 글자만 바뀌어 눈에 띄지 않았다."""
+        found: list[str] = []
+        base = self.cfg.get("pack_url")
+        remote = ""
+        if base:
+            try:
+                remote = pack_mod.remote_version(base)
+            except (OSError, ValueError):
+                remote = ""         # 연결이 안 되면 이번에는 넘어간다
+            # 판 번호는 'YYYY.MM.DD-HHMM' 이라 글자 순서가 시간 순서다. '다르면' 이 아니라 '더 새로우면' 이어야 한다:
+            # 배포자 PC 는 올리기 전의 새 묶음을 이미 갖고 있어, 다르다고만 보면 더 오래된 올라간 판을 받으라고 묻는다
+            if remote and remote > self.resolver.pack.version:
+                found.append(f"번역 묶음 {remote}")
+                self.root.after(0, self._show_pack, f"새 번역 묶음이 있습니다 ({remote}).")
+            else:
+                remote = ""
+        data_base = dbfetch.base_url(self.cfg)
+        info = dbfetch.remote_info(data_base) if data_base else None
+        # 만든 날이 더 늦을 때만. dbfetch.is_newer 는 게임 데이터 커밋이 '다르면' 참이라 위와 같은 일이 생긴다
+        if info and (info.get("built_at") or "") <= (self.resolver.db.meta.get("built_at") or ""):
+            info = None
+        if info:
+            found.append(f"공식 데이터 {info.get('built_at', '')} (약 {dbfetch.size_mb(info)}MB)")
+        if found:
+            self.root.after(0, self._offer_update, found, remote, data_base, info)
+
+    def _offer_update(self, found: list[str], pack_version: str, data_base: str, info) -> None:
+        text = "\n".join(f"· {line}" for line in found)
+        if not self._ask("새 번역이 있습니다", f"새로 올라온 것이 있습니다.\n{text}\n\n지금 받고 번역기를 다시 켤까요?\n"
+                         "(다시 켜는 데 몇 초 걸립니다. 나중에 하려면 '나중에' — 데이터 탭에서 받을 수 있습니다.)",
+                         "받고 다시 켜기", "나중에"):
+            self.msg_var.set("새 번역이 있습니다. 데이터 탭에서 받을 수 있습니다.")
             return
-        if remote and remote != self.resolver.pack.version:
-            self.root.after(0, self._show_pack, f"새 번역 묶음이 있습니다 ({remote}). 받기를 누르세요.")
+        self.msg_var.set("새 번역을 받는 중… 다 받으면 번역기를 다시 켭니다.")
+        threading.Thread(target=self._apply_updates, args=(pack_version, data_base, info), daemon=True).start()
+
+    def _ask(self, title: str, text: str, yes: str, no: str) -> bool:
+        """게임 위에도 보이는 예/아니요 창. 표준 메시지 상자는 맨 위 표시를 못 해서 게임이 전체 화면이면 가려졌다 (2026-11-10)."""
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.configure(bg=theme.BG)
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        theme.dark_title_bar(win)
+        box = theme.card(win)
+        box.pack(fill="both", expand=True, padx=12, pady=12)
+        theme.card_title(box, title).pack(anchor="w", padx=18, pady=(16, 6))
+        ttk.Label(box, text=text, style="Card.TLabel", wraplength=380, justify="left").pack(anchor="w", padx=18)
+        answer = {"yes": False}
+
+        def close(value: bool) -> None:
+            answer["yes"] = value
+            win.destroy()
+
+        row = ttk.Frame(box, style="Card.TFrame")
+        row.pack(anchor="e", padx=18, pady=(14, 16))
+        ttk.Button(row, text=no, command=lambda: close(False)).pack(side="right")
+        ttk.Button(row, text=yes, style="Accent.TButton", command=lambda: close(True)).pack(side="right", padx=(0, 8))
+        win.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        win.geometry(f"+{(win.winfo_screenwidth() - w) // 2}+{(win.winfo_screenheight() - h) // 3}")
+        win.lift()
+        win.focus_force()
+        self.root.wait_window(win)
+        return answer["yes"]
+
+    def _apply_updates(self, pack_version: str, data_base: str, info) -> None:
+        try:
+            if pack_version:
+                pack_mod.fetch(self.cfg["pack_url"], os.path.join(config.DATA_DIR, "pack"))
+                self.resolver.reload_pack()
+            if info:
+                dbfetch.download(data_base, info, config.DATA_DIR, cancelled=self.engine.closing.is_set)
+        except (OSError, ValueError, dbfetch.FetchError) as exc:
+            self._notice(f"새 번역을 받지 못했습니다: {exc}")
+            return
+        self.root.after(0, self.restart)
+
+    def restart(self) -> None:
+        """번역기를 끄고 같은 프로그램을 다시 켠다. 새 프로세스는 이쪽이 끝나기를 기다린다 (acquire_single_instance)."""
+        cmd = [sys.executable] if config.FROZEN else [sys.executable, os.path.join(config.ROOT, "main.py")]
+        try:
+            subprocess.Popen(cmd, cwd=config.ROOT, env=dict(os.environ, **{RESTART_ENV: "1"}))
+        except OSError as exc:
+            self.msg_var.set(f"다시 켜지 못했습니다: {exc}. 직접 다시 켜 주세요.")
+            return
+        self.quit()
 
     def _fetch_pack(self) -> None:
         self.pack_btn.configure(state="disabled")
@@ -1146,8 +1234,15 @@ def acquire_single_instance() -> bool:
     """두 개가 뜨면 오버레이가 겹치고 번역 캐시를 동시에 쓴다."""
     global _instance_mutex
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _instance_mutex = kernel32.CreateMutexW(None, False, "ArknightsTranslatorOverlay")
-    return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+    # 스스로 다시 켠 프로세스(App.restart)는 이전 프로세스가 끝나 잠금을 놓을 때까지 기다린다
+    waits = 80 if os.environ.pop(RESTART_ENV, "") else 1
+    for _ in range(waits):
+        _instance_mutex = kernel32.CreateMutexW(None, False, "ArknightsTranslatorOverlay")
+        if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+            return True
+        kernel32.CloseHandle(_instance_mutex)
+        time.sleep(0.25)
+    return False
 
 
 def main() -> None:

@@ -33,6 +33,7 @@ REPORT_MAX = 1500                        # 칸마다 넣을 글자 수 상한 (�
 FUZZY_MIN = 20          # 이보다 짧은 숫자 틀은 비슷한 것으로 고르지 않는다 (글자 하나 차이로 뜻이 바뀐다)
 FUZZY_RATIO = 0.9       # 화면 글자와 틀 원문이 이만큼 같아야 한다 (75자 설명에서 몇 자 놓친 정도)
 FUZZY_MARGIN = 0.01     # 둘째로 비슷한 틀과 이만큼은 차이 나야 한다
+WITHIN_MIN = 12         # 잘린 문단 찾기: 이 길이 이상인 줄만 (resolver.WITHIN_MIN 과 같게)
 
 
 def _slots_align(sm: difflib.SequenceMatcher) -> bool:
@@ -118,11 +119,13 @@ class PackStore:
         # 오퍼레이터 이름 (names.tsv, 배포자가 손으로 정한 것): 원문 키 -> 이름. 같은 글자의 대사 줄('嘉辛塔？' → '자신타?')보다 먼저 쓴다
         self._names: dict[str, str] = {}
         self._grams: dict[str, list[str]] = {}          # 틀 키의 세 글자 조각 -> 틀 키 (비슷한 틀 찾기)
+        self._long: list[str] = []                      # 긴 줄의 키 (잘린 문단 찾기)
         self.manifest: dict = {}
         self.load()
 
     def load(self) -> None:
         table, templates, names, manifest = {}, {}, {}, {}
+        long_keys: set[str] = set()
         path = os.path.join(self.folder, MANIFEST)
         try:
             with open(path, encoding="utf-8") as f:
@@ -141,6 +144,8 @@ class PackStore:
                     continue
                 if k and ko:
                     table.setdefault(k, (ko, category))
+                    if len(k) >= WITHIN_MIN and "{" not in zh and "{" not in ko:
+                        long_keys.add(k)       # 숫자 틀 줄은 잘린 문단 후보가 아니다 ('{0}' 가 화면에 뜬다)
                     if "{" in zh:
                         tk = tn.template_key(zh)
                         if tn.SLOT in tk:
@@ -148,9 +153,20 @@ class PackStore:
         with self._lock:
             self._table, self._templates, self._names, self.manifest = table, templates, names, manifest
             self._grams = _gram_index(templates)
+            self._long = sorted(long_keys)
 
     def get(self, k: str) -> tuple[str, str] | None:
         return self._table.get(k)
+
+    def templates_containing(self, tk: str, min_ratio: float) -> list[tuple[str, str]]:
+        """(원문 틀, 번역 틀). 틀 키 안에 tk 가 통째로 들고 tk 가 그 틀의 min_ratio 이상인 틀 (잘린 스킬 설명용)."""
+        top = len(tk) / min_ratio
+        return [pair for ck, pair in self._templates.items() if len(tk) < len(ck) <= top and tk in ck]
+
+    def containing(self, k: str, min_ratio: float) -> list[tuple[str, str, str]]:
+        """(키, 번역문, 분류). 키 k 가 통째로 들어 있고 k 가 그 줄의 min_ratio 이상인 줄 (잘린 문단용)."""
+        top = len(k) / min_ratio
+        return [(ck, *self._table[ck]) for ck in self._long if len(k) < len(ck) <= top and k in ck]
 
     def name(self, k: str) -> str | None:
         """한국 서버에 없는 오퍼레이터의 이름 (영문 이름을 한국 서버 표기법으로 옮긴 것)."""

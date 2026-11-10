@@ -153,6 +153,19 @@ class OfficialDB:
             return None
         return Hit(zh=row[0], ko=filled, via="template", src=row[2])
 
+    def templates_containing(self, tk: str, min_ratio: float, limit: int = 40) -> list[tuple[str, str | None]]:
+        """(원문 틀, 번역 틀 또는 None). 숫자를 #으로 바꾼 틀 키 안에 tk 가 통째로 들고 tk 가 그 틀의 min_ratio 이상인 틀.
+        줄이 잘려 일부만 읽힌 스킬 설명을 틀에서 찾는 데 쓴다."""
+        if len(tk) < 8:
+            return []
+        try:
+            rows = self._db().execute(
+                "SELECT zh, ko FROM templates WHERE instr(k, ?) > 0 AND length(k) > ? AND length(k) <= ? LIMIT ?",
+                (tk, len(tk), int(len(tk) / min_ratio), limit)).fetchall()
+        except sqlite3.Error:
+            return []
+        return rows
+
     def _fuzzy(self, k: str) -> Hit | None:
         if len(k) < MIN_FUZZY_LEN:
             return None
@@ -519,6 +532,21 @@ class OfficialDB:
         except sqlite3.Error:
             return []
         return [(ck, zh, ko) for ck, zh, ko, src in rows if k in ck and src not in ("story", "speaker")]
+
+    def containing(self, k: str, min_ratio: float, limit: int = 40) -> list[tuple[str, str, str, str]]:
+        """(키, 원문, 공식 번역, 표). 키 k 가 통째로 들어 있고 k 가 그 글의 min_ratio 이상인 글.
+        문단이 화면 가장자리에서 잘려 앞이나 뒤가 빠진 채 읽힌 글을 찾는 데 쓴다. 대사도 포함한다 (k 가 열두 글자 넘게 길다)."""
+        if len(k) < FTS_MIN:
+            return []
+        try:
+            rows = self._db().execute(
+                "SELECT t.k, t.zh, t.ko, t.src FROM fts JOIN texts t ON t.id = fts.rowid "
+                "WHERE fts MATCH ? AND t.ko IS NOT NULL AND length(t.k) > ? AND length(t.k) <= ? LIMIT ?",
+                (_all_grams(k), len(k), int(len(k) / min_ratio), limit),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        return [row for row in rows if k in row[0]]
 
     def _short_ui(self) -> dict[str, list[tuple[str, str, str]]]:
         """색인(fts)에 없는 네 글자 화면 글을 앞이나 뒤 한 글자를 뗀 키로 찾는 표 ('示我以' → '示我以真').

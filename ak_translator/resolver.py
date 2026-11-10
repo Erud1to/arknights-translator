@@ -35,6 +35,15 @@ COMPLETE_MIN, COMPLETE_MAX = 3, 8
 # 한 글자를 잘못 읽은 화면 글을 찾아보는 길이. 다섯 글자 이하는 한 자만 다른 진짜 글('限定寻访'·'限时寻访')이 흔하다
 ONE_OFF_MIN, ONE_OFF_MAX = 6, 12
 LABEL_MAX = 12          # 값 앞의 글을 따로 기계 번역할 때 글 길이 상한 (그보다 길면 문장째 번역한다)
+# 문단이 화면 가장자리에서 잘려 일부만 읽힌 글을 공식·묶음의 긴 글에서 찾는다. 열두 글자는 되어야 맞는 글이 하나로 좁혀지고,
+# 읽은 글이 그 글의 이만큼은 되어야 번역 전체를 보여 줘도 어색하지 않다 (적으면 조각만 기계 번역하는 편이 낫다)
+WITHIN_MIN, WITHIN_RATIO = 12, 0.4
+# 여러 공식 항목이 한 블록으로 이어 읽힌 긴 글(모듈 스토리 일기 여러 편, 대사와 지문)을 문장 2~5개씩 묶어 하나씩 공식 번역과 맞춘다
+SENT_MIN, SENT_SPAN = 40, 5
+_SENT_SPLIT = re.compile(r"[^。！？!?]*[。！？!?]+[”’」』）)]*|[^。！？!?]+$")
+WITHIN_TPL_RATIO = 0.15   # 숫자 틀을 찾을 때는 더 적게 보여도 된다 (보이는 절만 잘라 쓴다. 절이 안 맞으면 WITHIN_RATIO 를 다시 본다)
+WITHIN_CUTS = ((0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (0, 2), (2, 2))   # 잘린 끝에서 헛읽은 글자를 이만큼 떼어 본다
+WITHIN_CACHE = 512
 
 
 @dataclass
@@ -168,6 +177,8 @@ class Resolver:
         self.story_ai = None
         self.set_story_ai(cfg)
         self.stats = {"official": 0, "pack": 0, "cache": 0, "mt": 0, "user": 0, "failed": 0}
+        self._sent_cache: dict[str, list[str] | None] = {}                 # 문장 묶음 맞추기 결과 (_by_sentences)
+        self._within_cache: dict[str, tuple[str, str, str] | None] = {}    # 잘린 문단 찾기 결과 (_within)
 
         self._queue: queue.PriorityQueue = queue.PriorityQueue()
         self._seq = 0
@@ -189,6 +200,8 @@ class Resolver:
     def reload_pack(self) -> None:
         """새로 받은 번역 묶음을 읽고, 한국 서버에 없는 오퍼레이터 이름도 묶음 것으로 다시 만든다."""
         self.pack.load()
+        self._within_cache.clear()
+        self._sent_cache.clear()
         threading.Thread(target=self._load_names, name="names", daemon=True).start()
 
     def _load_names(self) -> None:
@@ -279,7 +292,7 @@ class Resolver:
             # 한국 서버에 없는 숫자 틀 (스킬 설명 등): 번역 묶음의 틀을 화면 숫자로 채운다. 묶음 틀은 게임 글의 줄
             # (줄바꿈)마다 따로 있어, 화면에서 따로 묶인 '过载：…' 같은 단락도 맞는다. 못 채우면 화면 글자를 그대로
             # 다룬다 (DB 의 틀 원문을 기계 번역하면 '{atk_scale:0%}' 가 화면에 뜬다)
-            filled = self._pack_template(text)
+            filled = self._pack_template(text) or self._template_within(text)
             if filled is not None:
                 return filled
             hit = None
@@ -311,7 +324,7 @@ class Resolver:
             if dashed is not None:
                 return dashed
             # 짧은 화면 글자의 앞뒤를 놓치고 가운데만 읽은 것 ('目标生命值' → '标生命'), 한 자를 잘못 읽은 것
-            whole = self._completed(text) or self._one_off(text)
+            whole = self._completed(text) or self._one_off(text) or self._by_sentences(text) or self._within(text)
             if whole is not None:
                 return whole
             # 두 줄을 한 덩어리로 읽은 '职业需求（最多3项）' · 남은 시간이 앞에 붙은 '27：弓1：22联络中'
@@ -711,6 +724,142 @@ class Resolver:
                 self.stats["official"] += 1
                 return Resolved(tn.display_ko(ko, self.cfg.get("nickname", "박사")), "official", zh,
                                 missed=(at, len(cand_k) - at - len(k)))
+        return None
+
+    def _within(self, text: str) -> Resolved | None:
+        """문단이 잘려 앞이나 뒤가 빠진 채 읽힌 글을 공식·번역 묶음의 긴 글에서 찾는다 (읽은 글자가 그 글 안에 통째로 든다).
+        2026-11-10 사용자: '문단 일부가 잘리면 통째로 기계번역으로 넘어감'. 후보의 번역이 하나뿐일 때만 쓴다.
+        한국어 문장을 잘라 쓰지 않고 번역 전체를 보인다 (중·한 문장 수가 맞는 글은 35% 뿐이라 자르면 틀린다)."""
+        k = tn.key(text)
+        if len(k) < WITHIN_MIN or tn.cjk_count(k) < len(k) * 0.7:
+            return None
+        if k in self._within_cache:
+            found = self._within_cache[k]
+        else:
+            found = self._find_within(k)
+            if len(self._within_cache) >= WITHIN_CACHE:
+                self._within_cache.pop(next(iter(self._within_cache)))
+            self._within_cache[k] = found
+        if found is None:
+            return None
+        ko, zh, via = found
+        self.stats[via] += 1
+        return Resolved(tn.display_ko(ko, self.cfg.get("nickname", "박사")), via, zh)
+
+    def _by_sentences(self, text: str) -> Resolved | None:
+        """공식 항목 여러 개가 한 블록으로 읽힌 긴 글을 문장 2~5개씩 묶어 가며 하나씩 공식(또는 번역 묶음) 번역으로 옮겨 잇는다.
+        2026-11-10 배포판 캡처: 모듈 스토리 '荡平天下不平事。七月三十，多云。…' 는 일기 5편이 한 블록이라 한 문단에 들지 않아
+        통째로 기계 번역이 됐다. 문장 하나라도 못 맞추면(OCR 오류) 쓰지 않고 기계 번역에 맡긴다."""
+        k = tn.key(text)
+        if len(k) < SENT_MIN or tn.cjk_count(k) < len(k) * 0.7:
+            return None
+        sents = [x for x in _SENT_SPLIT.findall(text) if tn.key(x)]
+        if len(sents) < 2:
+            return None
+        if k in self._sent_cache:
+            found = self._sent_cache[k]
+        else:
+            found = self._cover_sentences(sents)
+            if len(self._sent_cache) >= WITHIN_CACHE:
+                self._sent_cache.pop(next(iter(self._sent_cache)))
+            self._sent_cache[k] = found
+        if found is None:
+            return None
+        self.stats["official"] += 1
+        return Resolved(" ".join(found), "official", text)
+
+    def _cover_sentences(self, sents: list[str]) -> list[str] | None:
+        nick = self.cfg.get("nickname", "박사")
+        out: list[str] = []
+        i = kept = 0
+        while i < len(sents):
+            for span in range(min(SENT_SPAN, len(sents) - i), 0, -1):
+                piece = "".join(sents[i:i + span])
+                pk = tn.key(piece)
+                if len(pk) < 4:
+                    continue
+                hit = self.db.lookup(piece, fuzzy=False)
+                ko = hit.ko if hit and hit.ko else None
+                if ko is None:
+                    packed = self.pack.get(pk)
+                    ko = packed[0] if packed else None
+                if ko:
+                    out.append(tn.display_ko(ko, nick))
+                    i += span
+                    break
+            else:
+                # 못 맞춘 문장: OCR 이 숫자·기호를 섞어 읽었으면 비슷한 공식 문장으로 맞춘다. 그래도 안 되고 짧은 제목 한 줄이면
+                # 원문 그대로 둔다 (모듈 스토리 맨 앞 '荡平天下不平事。' 는 공식 항목이 아니다). 그 밖에는 쓰지 않는다
+                near = None
+                for span in range(min(3, len(sents) - i), 0, -1):
+                    piece = "".join(sents[i:i + span])
+                    hit = self.db.lookup(piece, fuzzy=True) if len(tn.key(piece)) >= 12 else None
+                    if hit and hit.ko and hit.via in ("fuzzy", "exact"):
+                        near = (hit.ko, span)
+                        break
+                if near:
+                    out.append(tn.display_ko(near[0], nick))
+                    i += near[1]
+                elif len(tn.key(sents[i])) <= 12 and not kept and i == 0:
+                    out.append(sents[i].strip())
+                    kept += 1
+                    i += 1
+                else:
+                    return None
+        return out
+
+    def _template_within(self, text: str) -> Resolved | None:
+        """줄이 잘려 숫자 틀의 일부만 읽힌 글(위수협의 스킬 설명 '…攻击速度+100，每次攻击对目标…最多5名地面敌人造成相当于')을
+        틀에서 찾아, 보이는 숫자만 화면 값으로 채운다. 안 보이는 자리는 '…'. 틀이 하나로 좁혀질 때만 쓴다."""
+        tk = tn.template_key(text)
+        values = tn.numbers_of(tn.strip_rich(text))
+        if len(tk) < WITHIN_MIN or tn.SLOT not in tk or tn.cjk_count(tk) < 8 or len(values) != tk.count(tn.SLOT):
+            return None
+        for head, tail in WITHIN_CUTS:
+            part = tk[head:len(tk) - tail]
+            if len(part) < WITHIN_MIN or part.count(tn.SLOT) != tk.count(tn.SLOT):
+                continue
+            found: dict[str, tuple[str, str]] = {}
+            pairs = [(zh, ko, "official") for zh, ko in self.db.templates_containing(part, WITHIN_TPL_RATIO) if ko]
+            pairs += [(zh, ko, "pack") for zh, ko in self.pack.templates_containing(part, WITHIN_TPL_RATIO)]
+            for zh, ko, via in pairs:
+                ck = tn.template_key(zh)
+                at = ck.find(part)
+                if at < 0:
+                    continue
+                first = ck[:at].count(tn.SLOT)
+                # 보이는 절만 잘라 쓴다. 절 수가 안 맞으면 번역 전체를 쓰되 보이는 부분이 절반 가까이는 되어야 한다
+                sliced = tn.clause_slice(zh, ko, part, first)
+                if sliced is not None:
+                    zh, ko, first = sliced
+                elif len(part) < len(ck) * WITHIN_RATIO:
+                    continue
+                filled = tn.fill_template(zh, ko, text, first)
+                if filled:
+                    found.setdefault(filled, (zh, via))
+            if len(found) == 1:
+                filled, (zh, via) = next(iter(found.items()))
+                self.stats[via] += 1
+                return Resolved(tn.display_ko(filled, self.cfg.get("nickname", "박사")), via, zh)
+            if found:
+                return None
+        return None
+
+    def _find_within(self, k: str) -> tuple[str, str, str] | None:
+        for head, tail in WITHIN_CUTS:
+            part = k[head:len(k) - tail]
+            if len(part) < WITHIN_MIN:
+                break
+            found: dict[str, tuple[str, str]] = {}
+            for _ck, zh, ko, _src in self.db.containing(part, WITHIN_RATIO):
+                found.setdefault(ko, (zh, "official"))
+            for ck, ko, _cat in self.pack.containing(part, WITHIN_RATIO):
+                found.setdefault(ko, (ck, "pack"))
+            if len(found) == 1:
+                ko, (zh, via) = next(iter(found.items()))
+                return ko, zh, via
+            if found:
+                return None     # 후보가 여럿이면 어느 글인지 모른다
         return None
 
     def _ui_hit(self, text: str):

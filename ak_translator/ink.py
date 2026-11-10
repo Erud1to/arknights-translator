@@ -106,7 +106,11 @@ def _matches(g: np.ndarray, x: int, y: int, ink: Ink) -> bool:
         return False
     if not len(ink.bys):
         return True
-    bg = g[ink.bys + y, ink.bxs + x]
+    # 바탕 표본은 글자 획 표본보다 상자 바깥쪽에 있을 수 있어 화면 밖으로 나갈 수 있다 (배포판 오류 기록: IndexError index 1440)
+    bys, bxs = ink.bys + y, ink.bxs + x
+    if bys.min() < 0 or bxs.min() < 0 or bys.max() >= h or bxs.max() >= w:
+        return False
+    bg = g[bys, bxs]
     inked = (bg < ink.thr) if ink.dark else (bg > ink.thr)
     if inked.mean() > BG_INKED:
         return False
