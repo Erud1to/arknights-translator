@@ -514,7 +514,9 @@ class App:
         ttk.Button(row, text="번역캐시 열기", command=lambda: self._open("번역캐시.md")).pack(side="left")
         ttk.Button(row, text="용어집 열기", command=lambda: self._open("용어집.md")).pack(side="left", padx=(8, 0))
         ttk.Button(row, text="문제 화면 폴더", command=self._open_debug).pack(side="left", padx=(8, 0))
-        ttk.Button(row, text="문제 제보", command=self.report_problem).pack(side="left", padx=(8, 0))
+        row2 = ttk.Frame(parent, style="Card.TFrame")    # 한 줄에 다 넣으면 기본 패널 폭에서 잘린다
+        row2.pack(anchor="w", padx=16, pady=(8, 0))
+        ttk.Button(row2, text="문제 제보 (방금 저장한 문제 화면을 GitHub 로)", command=self.report_problem).pack(side="left")
         ttk.Label(parent, text="번역캐시의 번역문을 고쳐 저장하면 게임 중에도 2초 안에 바뀝니다. "
                                "용어집에 적은 이름은 공식 번역보다 먼저 쓰입니다.",
                   style="Muted.TLabel", wraplength=400).pack(anchor="w", padx=16, pady=(6, 0))
