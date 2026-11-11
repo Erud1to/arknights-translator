@@ -114,7 +114,8 @@ class WindowsOCR:
             if self.engine is not None:
                 break
         if self.engine is None:
-            raise RuntimeError("Windows 중국어(간체) OCR 언어 팩이 설치되어 있지 않습니다.")
+            raise RuntimeError("Windows 중국어(간체) 언어 팩이 없어 글자를 읽을 수 없습니다. "
+                               "설정 → 시간 및 언어 → 언어 및 지역 → 언어 추가 → 中文(简体) 에서 '텍스트 인식'을 받고 다시 실행하세요.")
 
     def recognize(self, image: Image.Image, scale: float = 1.0) -> list[OCRLine]:
         work = image

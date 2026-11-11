@@ -44,6 +44,8 @@ DEFAULTS = {
     "pack_url": "https://raw.githubusercontent.com/Erud1to/ak-translations/main/",
     # 화면 글을 공식·번역 묶음 글에 맞추는 방식. index: 조각 색인(기본), rules: 옛 규칙, shadow: 옛 규칙으로 보이되 색인과 다른 결과를 기록
     "matcher": "index",
+    # 게임 창 제목에 이 글자가 있으면 그 창을 게임으로 본다 (기본 탐색이 못 찾을 때 쓰는 대비책. 비우면 쓰지 않음)
+    "game_title": "",
     "panel_geometry": "",
     # peek: 누르고 있는 동안 번역문을 숨겨 원문을 본다
     "hotkeys": {"translate": "ctrl+alt+t", "toggle": "ctrl+alt+h", "capture": "ctrl+alt+s",

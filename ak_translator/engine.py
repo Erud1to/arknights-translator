@@ -104,14 +104,32 @@ class StoryLine:
     src: str          # OCR 이 읽은 글자
 
 
-def find_game() -> int:
+GAME_EXES = ("arknights.exe", "明日方舟.exe")
+
+
+def find_game(own: set[int] | None = None, extra_titles=()) -> int:
+    titles = tuple(GAME_TITLES) + tuple(t for t in extra_titles if t)
     hwnd = winutil.user32.FindWindowExW(None, None, GAME_CLASS, None)
     while hwnd:
         title = winutil.window_title(hwnd)
-        if any(t in title for t in GAME_TITLES):
+        if any(t in title for t in titles):
             return hwnd
         hwnd = winutil.user32.FindWindowExW(None, hwnd, GAME_CLASS, None)
-    return 0
+    # 대체 탐색: 창 클래스가 다르거나(다른 렌더러·실행기) 제목이 조금 다른 경우.
+    # 게임 실행 파일 이름이거나, 제목에 게임 이름이 든 눈에 보이는 창을 쓴다. 우리 창은 뺀다
+    best = 0
+    try:
+        for w in winutil.list_windows(own or set()):
+            exe = w["exe"].lower()
+            if exe in GAME_EXES or any(t in w["title"] for t in titles):
+                if "translator" in exe or "번역" in w["title"]:
+                    continue
+                if exe in GAME_EXES:
+                    return w["hwnd"]      # 실행 파일이 확실하면 바로
+                best = best or w["hwnd"]
+    except Exception:
+        pass
+    return best
 
 
 def game_visible(hwnd: int, rect, own: set[int]) -> bool:
@@ -202,7 +220,7 @@ class Engine(threading.Thread):
                         dirty, dirty_since = True, started
 
                 if started >= next_find or not winutil.window_alive(hwnd):
-                    hwnd = find_game()
+                    hwnd = find_game(self.own_windows(), [self.cfg.get("game_title", "")])
                     next_find = started + 3.0
                 if not hwnd:
                     self.status.state = "게임을 기다리는 중"

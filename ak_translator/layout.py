@@ -551,6 +551,26 @@ def _area_overlap(a, b) -> int:
     return max(0, w) * max(0, h)
 
 
+def _lines_touch(a: Block, b: Block) -> bool:
+    """두 블록의 줄 가운데 서로 맞닿은 것이 있는가. 상자만 겹치고 줄은 멀리 떨어져 있으면 거짓이다.
+
+    문단 상자 안에 다른 글(지도 위 '岩壳蟹群' 꼬리표)이 들어앉아도 그 글이 문단의 줄과 이어진 것은 아니다.
+    같은 줄 자리에서 가로 간격이 FAR_GAP 안이거나, 줄 상자가 서로 겹쳐야 맞닿은 것이다.
+    """
+    for ma in a.members:
+        for mb in b.members:
+            small = min(ma.w * ma.h, mb.w * mb.h)
+            if small and _area_overlap((ma.x, ma.y, ma.w, ma.h), (mb.x, mb.y, mb.w, mb.h)) >= small * OVERLAP_MERGE:
+                return True
+            line_h = max(1, min(ma.line_h, mb.line_h))
+            inter = min(ma.y + ma.h, mb.y + mb.h) - max(ma.y, mb.y)
+            if inter >= min(ma.h, mb.h) * 0.5:
+                gap = max(ma.x, mb.x) - min(ma.x + ma.w, mb.x + mb.w)
+                if gap <= line_h * FAR_GAP:
+                    return True
+    return False
+
+
 def _merge_overlapping(blocks: list[Block]) -> list[Block]:
     """상자가 크게 겹치는 블록을 하나로 합친다.
 
@@ -565,7 +585,7 @@ def _merge_overlapping(blocks: list[Block]) -> list[Block]:
             for j in range(i + 1, len(out)):
                 a, b = out[i], out[j]
                 small = min(a.box[2] * a.box[3], b.box[2] * b.box[3])
-                if small and _area_overlap(a.box, b.box) >= small * OVERLAP_MERGE:
+                if small and _area_overlap(a.box, b.box) >= small * OVERLAP_MERGE and _lines_touch(a, b):
                     out[i] = _combine(a, b)
                     del out[j]
                     merged = True

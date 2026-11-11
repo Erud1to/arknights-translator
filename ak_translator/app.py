@@ -514,6 +514,7 @@ class App:
         ttk.Button(row, text="번역캐시 열기", command=lambda: self._open("번역캐시.md")).pack(side="left")
         ttk.Button(row, text="용어집 열기", command=lambda: self._open("용어집.md")).pack(side="left", padx=(8, 0))
         ttk.Button(row, text="문제 화면 폴더", command=self._open_debug).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="문제 제보", command=self.report_problem).pack(side="left", padx=(8, 0))
         ttk.Label(parent, text="번역캐시의 번역문을 고쳐 저장하면 게임 중에도 2초 안에 바뀝니다. "
                                "용어집에 적은 이름은 공식 번역보다 먼저 쓰입니다.",
                   style="Muted.TLabel", wraplength=400).pack(anchor="w", padx=16, pady=(6, 0))
@@ -982,6 +983,37 @@ class App:
         detail.set("브라우저에서 제보 화면을 열었습니다. 고칠 번역을 적고 'Submit new issue' 를 누르면 보내집니다 "
                             "(GitHub 로그인 필요).")
 
+    def report_problem(self) -> None:
+        """가장 최근 문제 화면을 zip 한 개로 묶어 폴더에서 보여 주고, 내용이 채워진 GitHub 이슈 화면을 연다.
+        GitHub 는 주소만으로 파일을 붙일 수 없어, 사용자는 zip 을 이슈 창에 끌어다 놓으면 된다."""
+        import urllib.parse
+        import zipfile
+        root = os.path.join(config.ROOT, "debug")
+        folders = sorted((d for d in (os.path.join(root, n) for n in (os.listdir(root) if os.path.isdir(root) else []))
+                          if os.path.isfile(os.path.join(d, "인식.md"))), key=os.path.getmtime)
+        if not folders:
+            self.msg_var.set("저장한 문제 화면이 없습니다. 번역이 이상한 화면에서 '문제 화면 저장'을 먼저 누르세요.")
+            return
+        folder = folders[-1]
+        out = folder + ".zip"
+        try:
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                for name in sorted(os.listdir(folder)):
+                    z.write(os.path.join(folder, name), os.path.join(os.path.basename(folder), name))
+        except OSError as exc:
+            self.msg_var.set(f"zip 으로 묶지 못했습니다: {exc}")
+            return
+        repo = self.cfg.get("app_repo") or version.REPO
+        body = (f"- 프로그램: {version.VERSION}\n- OCR: {self.engine.status.ocr_name or '?'}\n"
+                f"- 상태: {self.engine.status.state}\n\n"
+                "어떤 화면에서 무엇이 이상한지 적어 주세요.\n\n"
+                "(zip 파일을 이 창에 끌어다 놓으세요. 스크린샷에 계정 이름·UID 가 보이면 지우거나 가리고 올리세요. "
+                "이슈는 누구나 볼 수 있습니다.)\n")
+        url = f"https://github.com/{repo}/issues/new?" + urllib.parse.urlencode({"title": "문제 제보", "body": body})
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(out)])
+        webbrowser.open(url)
+        self.msg_var.set("zip 파일을 보여 드렸습니다. 열린 GitHub 창에 그 파일을 끌어다 놓고 제출하세요.")
+
     def _open_debug(self) -> None:
         folder = os.path.join(config.ROOT, "debug")
         os.makedirs(folder, exist_ok=True)
@@ -998,7 +1030,7 @@ class App:
         self.engine.paused.set()
         self.engine.idle.wait(2.0)    # 읽는 도중이면 끝날 때까지 기다린다
         try:
-            hwnd = engine_mod.find_game()
+            hwnd = engine_mod.find_game(self._own_windows(), [self.cfg.get("game_title", "")])
             # 다른 창이 덮고 있으면 그 창이 찍힌다. 그런 화면은 남기지 않는다
             if not hwnd or not engine_mod.game_visible(hwnd, region, self._own_windows()):
                 self.msg_var.set("게임이 다른 창에 가려져 있어 저장하지 않았습니다.")

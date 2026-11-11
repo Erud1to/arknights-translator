@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 # 프로그램을 올릴 GitHub 저장소 'owner/name'. 비어 있으면 새 판을 찾지 않는다 (config.json 의 app_repo 가 먼저)
 REPO = "Erud1to/arknights-translator"
 LATEST_URL = "https://api.github.com/repos/{repo}/releases/latest"
